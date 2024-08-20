@@ -1,6 +1,6 @@
 import EventEmitter from 'events';
 import ProtocolMapping from 'devtools-protocol/types/protocol-mapping';
-import { BrowserWindow, Debugger, WebContents } from 'electron';
+import { Debugger, WebContents } from 'electron';
 import { ExecutionContext } from './executionContext';
 import Protocol from 'devtools-protocol';
 
@@ -24,7 +24,7 @@ export declare type Events = {
  * Options for exposing a function.
  */
 export interface ExposeFunctionOptions {
-    withReturnValue?: boolean;
+    withReturnValue?: boolean | { timeout: number, delay: number };
 }
 
 /**
@@ -100,27 +100,33 @@ export class Session extends EventEmitter<Events> {
     async exposeFunction<T, A extends any[]>(name: string, fn: (...args: A) => T, options?: ExposeFunctionOptions) {
         await this.send('Runtime.addBinding', { name: '_callback' });
         const attachFunction = (name: string, options?: ExposeFunctionOptions, executionContextId?: Protocol.Runtime.ExecutionContextId) => {
+
+            window._executionContextId = executionContextId;
+
+            // @ts-ignore
             window[name] = (...args: any[]) =>
                 new Promise((resolve, reject) => {
                     try {
-                        const topWindow = window.top ? window.top : window;
-                        if (topWindow._callSeq === undefined) {
-                            topWindow._callSeq = BigInt(0);
+                        if (window._callSeq === undefined) {
+                            window._callSeq = BigInt(0);
                         }
-                        const callSequence = String(topWindow._callSeq++);
+                        const callSequence = String(window._callSeq++);
                         window._callback(JSON.stringify({ executionContextId, callSequence, name, args }));
                         if (options?.withReturnValue) {
                             const h = setInterval(() => {
                                 try {
-                                    if (topWindow._retrunValues && callSequence in topWindow._retrunValues) {
-                                        resolve(topWindow._retrunValues[callSequence]);
-                                        delete topWindow._retrunValues[callSequence];
+                                    if (window._retrunValues && callSequence in window._retrunValues) {
+                                        resolve(window._retrunValues[callSequence]);
+                                        delete window._retrunValues[callSequence];
                                         clearInterval(h);
                                     }
                                 } catch (error) {
                                     reject(error);
                                 }
-                            });
+                            }, typeof options.withReturnValue === 'object' ? options.withReturnValue.delay : 1);
+                            if (typeof options.withReturnValue === 'object') {
+                                setTimeout(() => clearInterval(h), options.withReturnValue.timeout);
+                            }
                         }
                     } catch (error) {
                         reject(error);
@@ -133,7 +139,7 @@ export class Session extends EventEmitter<Events> {
             try {
                 await context.evaluate(attachFunction, name, options, context.id);
             } catch (error) {
-                if ((error as Error).message !== 'uniqueContextId not found') {
+                if ((error as Error).message !== 'Cannot find context with specified id') {
                     console.warn(error);
                 }
             }
@@ -149,12 +155,16 @@ export class Session extends EventEmitter<Events> {
                             if (options?.withReturnValue) {
                                 const context = payload.executionContextId ? new ExecutionContext(this, payload.executionContextId) : new ExecutionContext(this, event.executionContextId);
                                 await context.evaluate((id, seq, ret) => {
-                                    const topWindow = window.top ? window.top : window;
-                                    topWindow._executionContextId = id;
-                                    if (topWindow._retrunValues === undefined) {
-                                        topWindow._retrunValues = {};
+                                    if (window._executionContextId === undefined) {
+                                        console.log(`id:${id}`);
+                                        window._executionContextId = id;
+                                    } else {
+                                        console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
                                     }
-                                    topWindow._retrunValues[seq] = ret;
+                                    if (window._retrunValues === undefined) {
+                                        window._retrunValues = {};
+                                    }
+                                    window._retrunValues[seq] = ret;
                                 }, event.executionContextId, payload.callSequence, ret);
                             }
                         }
@@ -162,7 +172,7 @@ export class Session extends EventEmitter<Events> {
                     }
                 }
             } catch (error) {
-                if ((error as Error).message !== 'target closed while handling command') {
+                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                     console.warn(error);
                 }
             }

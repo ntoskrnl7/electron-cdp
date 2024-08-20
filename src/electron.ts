@@ -2,15 +2,31 @@
 import { BrowserWindow, WebContents } from 'electron';
 import { Session as CDPSession, ExposeFunctionOptions, Session } from './session';
 import Protocol from 'devtools-protocol';
-import { ExecutionContext } from './executionContext';
+import { EvaluateOptions } from '.';
 
 declare global {
     interface Window {
+        /**
+         * Callback invocation sequence.
+         */
         _callSeq?: bigint;
+
+        /**
+         * Execution context identifier.
+         * 
+         * (Main frame is undefined.)
+         */
         _executionContextId?: Protocol.Runtime.ExecutionContextId;
+
+        /**
+         * Method used internally by the exposeFunction method.
+         */
         _callback(payload: string): void;
+
+        /**
+         * Property used internally by the exposeFunction method.
+         */
         _retrunValues?: { [key: string]: Awaited<any> };
-        [key: string]: Function;
     }
 
     namespace Electron {
@@ -32,6 +48,16 @@ declare global {
              * @returns A promise that resolves with the result of the function.
              */
             evaluate<T, A extends any[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
+
+            /**
+             * Evaluates the provided function with additional options and the given arguments in the context of the current page.
+             * 
+             * @param options Additional options to customize the evaluation.
+             * @param fn - The function to be evaluated.
+             * @param args - The arguments to pass to the function.
+             * @returns A promise that resolves with the result of the function.
+             */
+            evaluate<T, A extends any[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
 
             /**
              * Exposes a function to the browser's global context under the specified name.
@@ -61,8 +87,23 @@ export function attach(target: BrowserWindow) {
     Object.defineProperty(webContents, 'exposeFunction', { value: session.exposeFunction.bind(session) });
 }
 
-async function evaluate<T, A extends any[]>(this: WebContents, fn: (...args: A) => T, ...args: A): Promise<T> {
-    const argsString = args.map(arg => {
+
+
+async function evaluate<T, A extends any[]>(this: WebContents, fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: any | ((...args: A) => T), ...args: A): Promise<T> {
+    let options: EvaluateOptions | undefined;
+    let fn: (...args: A) => T;
+    let actualArgs: A;
+
+    if (typeof fnOrOptions === 'function') {
+        fn = fnOrOptions as (...args: A) => T;
+        actualArgs = [fnOrArg0, ...args] as A;
+    } else {
+        options = fnOrOptions as EvaluateOptions;
+        fn = fnOrArg0 as (...args: A) => T;
+        actualArgs = args;
+    }
+
+    const argsString = actualArgs.map(arg => {
         switch (typeof arg) {
             case 'string':
                 return `\`${arg.replace(/`/g, '\\`')}\``;
@@ -74,6 +115,10 @@ async function evaluate<T, A extends any[]>(this: WebContents, fn: (...args: A) 
                 return arg.toString();
             case 'undefined':
                 return 'undefined';
+            case 'function':
+                if (!arg.toString().endsWith('{ [native code] }')) {
+                    return `new Function('return ' + ${JSON.stringify(arg.toString())})()`;
+                }
             default:
                 throw new Error(`Unsupported argument type: ${typeof arg}`);
         }
@@ -86,7 +131,6 @@ async function evaluate<T, A extends any[]>(this: WebContents, fn: (...args: A) 
                 const result = await fn(${argsString});
                 return JSON.stringify(result);
             } catch (error) {
-                console.log(error);
                 return JSON.stringify(error);
             }
         })();`);
