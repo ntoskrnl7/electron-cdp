@@ -26,7 +26,12 @@ declare global {
         /**
          * Property used internally by the exposeFunction method.
          */
-        _retrunValues?: { [key: string]: Awaited<any> };
+        _returnValues?: { [key: string]: Awaited<any> };
+
+        /**
+         * Property used internally by the exposeFunction method.
+         */
+        _returnErrors?: { [key: string]: Awaited<any> };
     }
 
     namespace Electron {
@@ -87,8 +92,6 @@ export function attach(target: BrowserWindow) {
     Object.defineProperty(webContents, 'exposeFunction', { value: session.exposeFunction.bind(session) });
 }
 
-
-
 async function evaluate<T, A extends any[]>(this: WebContents, fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: any | ((...args: A) => T), ...args: A): Promise<T> {
     let options: EvaluateOptions | undefined;
     let fn: (...args: A) => T;
@@ -107,8 +110,62 @@ async function evaluate<T, A extends any[]>(this: WebContents, fnOrOptions: ((..
         switch (typeof arg) {
             case 'string':
                 return `\`${arg.replace(/`/g, '\\`')}\``;
-            case 'object':
-                return JSON.stringify(arg);
+            case 'object': {
+                if (arg === null) {
+                    return 'null';
+                }
+                const toObject = (obj: object, depth?: number): object | null => {
+                    if (depth === undefined) {
+                        depth = 1;
+                    }
+                    const toObjectI = (obj: object, current: number) => {
+                        if (current > depth) {
+                            try {
+                                return JSON.parse(JSON.stringify(obj));
+                            } catch (error) {
+                                return null;
+                            }
+                        }
+                        const ret: { [key: string]: object | null } = {};
+                        for (const key in Object.getPrototypeOf(obj)) {
+                            const value = (obj as { [key: string]: object })[key];
+                            switch (typeof value) {
+                                case 'function':
+                                    break;
+                                case 'object':
+                                    if (value) {
+                                        ret[key] = toObjectI(value, current + 1);
+                                    }
+                                    break;
+                                default:
+                                    ret[key] = value;
+                                    break;
+                            }
+                        }
+                        for (const key in obj) {
+                            const value = (obj as { [key: string]: object })[key];
+                            switch (typeof value) {
+                                case 'function':
+                                    break;
+                                case 'object':
+                                    if (value) {
+                                        ret[key] = toObjectI(value, current + 1);
+                                    }
+                                    break;
+                                default:
+                                    ret[key] = value;
+                                    break;
+                            }
+                        }
+                        if (Object.entries(ret).length === 0 && ret.constructor === Object) {
+                            return obj.toString();
+                        }
+                        return ret;
+                    };
+                    return toObjectI(obj, 1);
+                };
+                return JSON.stringify(toObject(arg));
+            }
             case 'number':
             case 'bigint':
             case 'boolean':
@@ -126,13 +183,10 @@ async function evaluate<T, A extends any[]>(this: WebContents, fnOrOptions: ((..
 
     const result = await this.executeJavaScript(`
         (async () => {
-            try {
-                const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-                const result = await fn(${argsString});
-                return JSON.stringify(result);
-            } catch (error) {
-                return JSON.stringify(error);
-            }
-        })();`);
+            const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
+            const result = await fn(${argsString});
+            return JSON.stringify(result);
+        })();`,
+        options?.userGesture);
     return result === undefined ? undefined : JSON.parse(result);
 }

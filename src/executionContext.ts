@@ -90,8 +90,63 @@ export class ExecutionContext {
             switch (typeof arg) {
                 case 'string':
                     return `\`${arg.replace(/`/g, '\\`')}\``;
-                case 'object':
-                    return JSON.stringify(arg);
+                case 'object': {
+                    if (arg === null) {
+                        return 'null';
+                    }
+                    const toObject = (obj: object, depth?: number): object | null => {
+                        if (depth === undefined) {
+                            depth = 1;
+                        }
+                        const toObjectI = (obj: object, current: number) => {
+                            if (current > depth) {
+                                try {
+                                    return JSON.parse(JSON.stringify(obj));
+                                } catch (error) {
+                                    return null;
+                                }
+                            }
+                            const ret: { [key: string]: object | null } = {};
+                            for (const key in Object.getPrototypeOf(obj)) {
+                                const value = (obj as { [key: string]: object })[key];
+                                switch (typeof value) {
+                                    case 'function':
+                                        break;
+                                    case 'object':
+                                        if (value) {
+                                            ret[key] = toObjectI(value, current + 1);
+                                        }
+                                        break;
+                                    default:
+                                        ret[key] = value;
+                                        break;
+                                }
+                            }
+                            for (const key in obj) {
+                                const value = (obj as { [key: string]: object })[key];
+                                switch (typeof value) {
+                                    case 'function':
+                                        break;
+                                    case 'object':
+                                        if (value) {
+                                            ret[key] = toObjectI(value, current + 1);
+                                        }
+                                        break;
+                                    default:
+                                        ret[key] = value;
+                                        break;
+                                }
+                            }
+
+                            if (Object.entries(ret).length === 0 && ret.constructor === Object) {
+                                return obj.toString();
+                            }
+                            return ret;
+                        };
+                        return toObjectI(obj, 1);
+                    };
+                    return JSON.stringify(toObject(arg));
+                }
                 case 'number':
                 case 'bigint':
                 case 'boolean':

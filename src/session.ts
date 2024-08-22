@@ -115,9 +115,14 @@ export class Session extends EventEmitter<Events> {
                         if (options?.withReturnValue) {
                             const h = setInterval(() => {
                                 try {
-                                    if (window._retrunValues && callSequence in window._retrunValues) {
-                                        resolve(window._retrunValues[callSequence]);
-                                        delete window._retrunValues[callSequence];
+                                    if (window._returnValues && callSequence in window._returnValues) {
+                                        resolve(window._returnValues[callSequence]);
+                                        delete window._returnValues[callSequence];
+                                        clearInterval(h);
+                                    }
+                                    if (window._returnErrors && callSequence in window._returnErrors) {
+                                        reject(window._returnErrors[callSequence]);
+                                        delete window._returnErrors[callSequence];
                                         clearInterval(h);
                                     }
                                 } catch (error) {
@@ -151,21 +156,37 @@ export class Session extends EventEmitter<Events> {
                     case '_callback': {
                         const payload: { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A } = JSON.parse(event.payload);
                         if (payload.name === name) {
-                            const ret = await fn(...payload.args);
-                            if (options?.withReturnValue) {
-                                const context = payload.executionContextId ? new ExecutionContext(this, payload.executionContextId) : new ExecutionContext(this, event.executionContextId);
-                                await context.evaluate((id, seq, ret) => {
-                                    if (window._executionContextId === undefined) {
-                                        console.log(`id:${id}`);
-                                        window._executionContextId = id;
-                                    } else {
-                                        console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
-                                    }
-                                    if (window._retrunValues === undefined) {
-                                        window._retrunValues = {};
-                                    }
-                                    window._retrunValues[seq] = ret;
-                                }, event.executionContextId, payload.callSequence, ret);
+                            const context = payload.executionContextId ? new ExecutionContext(this, payload.executionContextId) : new ExecutionContext(this, event.executionContextId);
+                            try {
+                                const ret = await fn(...payload.args);
+                                if (options?.withReturnValue) {
+                                    await context.evaluate((id, seq, ret) => {
+                                        if (window._executionContextId === undefined) {
+                                            window._executionContextId = id;
+                                        } else {
+                                            console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
+                                        }
+                                        if (window._returnValues === undefined) {
+                                            window._returnValues = {};
+                                        }
+                                        window._returnValues[seq] = ret;
+                                    }, event.executionContextId, payload.callSequence, ret);
+                                }
+                            } catch (error) {
+                                console.log(error);
+                                if (options?.withReturnValue) {
+                                    await context.evaluate((id, seq, error) => {
+                                        if (window._executionContextId === undefined) {
+                                            window._executionContextId = id;
+                                        } else {
+                                            console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
+                                        }
+                                        if (window._returnErrors === undefined) {
+                                            window._returnErrors = {};
+                                        }
+                                        window._returnErrors[seq] = error;
+                                    }, event.executionContextId, payload.callSequence, error);
+                                }
                             }
                         }
                         break;
