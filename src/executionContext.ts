@@ -1,4 +1,4 @@
-import { Protocol } from "devtools-protocol";
+import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { Session } from "./session";
 import { EvaluateOptions } from ".";
 
@@ -13,14 +13,14 @@ export class ExecutionContext {
 
     /**
      * Creates an instance of ExecutionContext.
-     * 
+     *
      * @param session - The CDP session associated with this execution context.
      */
     constructor(session: Session);
 
     /**
      * Creates an instance of ExecutionContext with a specific ID.
-     * 
+     *
      * @param session - The CDP session associated with this execution context.
      * @param id - The ID of the execution context.
      */
@@ -28,7 +28,7 @@ export class ExecutionContext {
 
     /**
      * Creates an instance of ExecutionContext with a specific description.
-     * 
+     *
      * @param session - The CDP session associated with this execution context.
      * @param description - The description of the execution context.
      */
@@ -49,26 +49,26 @@ export class ExecutionContext {
 
     /**
      * Evaluates the provided function with the given arguments in the context of the current execution context.
-     * 
+     *
      * @param fn - The function to be evaluated.
      * @param args - The arguments to pass to the function.
      * @returns A promise that resolves with the result of the function.
      * @throws If an argument type is not supported.
      */
-    async evaluate<T, A extends any[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
+    async evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
 
     /**
      * Evaluates the provided function with additional options and the given arguments in the context of the current execution context.
-     * 
+     *
      * @param options - Additional options to customize the evaluation.
      * @param fn - The function to be evaluated.
      * @param args - The arguments to pass to the function.
      * @returns A promise that resolves with the result of the function.
      * @throws If an argument type is not supported.
      */
-    async evaluate<T, A extends any[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
+    async evaluate<T, A extends unknown[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
 
-    async evaluate<T, A extends any[]>(fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: any | ((...args: A) => T), ...args: A): Promise<T> {
+    async evaluate<T, A extends unknown[]>(fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: unknown | ((...args: A) => T), ...args: A): Promise<T> {
         let options: EvaluateOptions | undefined;
         let fn: (...args: A) => T;
         let actualArgs: A;
@@ -85,7 +85,7 @@ export class ExecutionContext {
         return this.#evaluate(options, fn, ...actualArgs);
     }
 
-    async #evaluate<T, A extends any[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
+    async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
         const argsString = args.map(arg => {
             switch (typeof arg) {
                 case 'string':
@@ -157,6 +157,7 @@ export class ExecutionContext {
                     if (!arg.toString().endsWith('{ [native code] }')) {
                         return `new Function('return ' + ${JSON.stringify(arg.toString())})()`;
                     }
+                // eslint-disable-next-line no-fallthrough
                 default:
                     throw new Error(`Unsupported argument type: ${typeof arg}`);
             }
@@ -182,7 +183,7 @@ export class ExecutionContext {
         }));
 
         if (res.exceptionDetails) {
-            let error: { [key: string]: any } = {};
+            const error: { [key: string]: unknown } = {};
             if (res.exceptionDetails.exception) {
                 if (res.exceptionDetails.exception.preview) {
                     res.exceptionDetails.exception.preview.properties.forEach(prop => {
@@ -210,10 +211,6 @@ export class ExecutionContext {
                 error['text'] = res.exceptionDetails.text;
             }
             throw error;
-        }
-
-        if (res.result.type === 'object') {
-            debugger;
         }
 
         return res.result.value === undefined ? undefined : JSON.parse(res.result.value);

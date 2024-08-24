@@ -1,8 +1,8 @@
 import EventEmitter from 'events';
-import ProtocolMapping from 'devtools-protocol/types/protocol-mapping';
+import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import { Debugger, WebContents } from 'electron';
 import { ExecutionContext } from './executionContext';
-import Protocol from 'devtools-protocol';
+import { Protocol } from 'devtools-protocol/types/protocol.d';
 
 /**
  * Options for sending commands.
@@ -37,7 +37,7 @@ export class Session extends EventEmitter<Events> {
 
     /**
      * Creates a new Session instance.
-     * 
+     *
      * @param window - The web contents associated with this session.
      */
     constructor(webContents: WebContents) {
@@ -58,14 +58,13 @@ export class Session extends EventEmitter<Events> {
 
     /**
      * Sends a command to the browser's DevTools protocol.
-     * 
+     *
      * @param method - The method name of the command.
      * @param params - The parameters for the command.
      * @param options - Options for sending the command.
-     * @returns A promise that resolves with the result of the command.
      * @throws If the debugger is not attached.
      */
-    send<T extends keyof ProtocolMapping.Commands>(method: T, params?: ProtocolMapping.Commands[T]['paramsType'][0], options?: CommandOptions): Promise<ProtocolMapping.Commands[T]['returnType']> {
+    send<T extends keyof ProtocolMapping.Commands>(method: T, params?: ProtocolMapping.Commands[T]['paramsType'][0]): Promise<ProtocolMapping.Commands[T]['returnType']> {
         if (!this.#debugger.isAttached()) {
             throw new Error('not attached');
         }
@@ -74,7 +73,7 @@ export class Session extends EventEmitter<Events> {
 
     /**
      * Attaches the debugger to the browser window.
-     * 
+     *
      * @param protocolVersion - The protocol version to use.
      */
     attach(protocolVersion?: string) {
@@ -97,14 +96,14 @@ export class Session extends EventEmitter<Events> {
      * @param fn - The function to expose.
      * @param options - Options for exposing the function.
      */
-    async exposeFunction<T, A extends any[]>(name: string, fn: (...args: A) => T, options?: ExposeFunctionOptions) {
+    async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => T, options?: ExposeFunctionOptions) {
         await this.send('Runtime.addBinding', { name: '_callback' });
         const attachFunction = (name: string, options?: ExposeFunctionOptions, executionContextId?: Protocol.Runtime.ExecutionContextId) => {
 
             window._executionContextId = executionContextId;
 
-            // @ts-ignore
-            window[name] = (...args: any[]) =>
+            // @ts-expect-error : window.[name]
+            window[name] = (...args: unknown[]) =>
                 new Promise((resolve, reject) => {
                     try {
                         if (window._callSeq === undefined) {

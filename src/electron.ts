@@ -1,7 +1,7 @@
 
 import { BrowserWindow, WebContents } from 'electron';
 import { Session as CDPSession, ExposeFunctionOptions, Session } from './session';
-import Protocol from 'devtools-protocol';
+import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { EvaluateOptions } from '.';
 
 declare global {
@@ -13,7 +13,7 @@ declare global {
 
         /**
          * Execution context identifier.
-         * 
+         *
          * (Main frame is undefined.)
          */
         _executionContextId?: Protocol.Runtime.ExecutionContextId;
@@ -26,14 +26,15 @@ declare global {
         /**
          * Property used internally by the exposeFunction method.
          */
-        _returnValues?: { [key: string]: Awaited<any> };
+        _returnValues?: { [key: string]: Awaited<unknown> };
 
         /**
          * Property used internally by the exposeFunction method.
          */
-        _returnErrors?: { [key: string]: Awaited<any> };
+        _returnErrors?: { [key: string]: Awaited<unknown> };
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-namespace
     namespace Electron {
         interface BrowserWindow {
             /**
@@ -52,7 +53,7 @@ declare global {
              * @param args - The arguments to pass to the function.
              * @returns A promise that resolves with the result of the function.
              */
-            evaluate<T, A extends any[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
+            evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
 
             /**
              * Evaluates the provided function with additional options and the given arguments in the context of the current page.
@@ -62,7 +63,7 @@ declare global {
              * @param args - The arguments to pass to the function.
              * @returns A promise that resolves with the result of the function.
              */
-            evaluate<T, A extends any[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
+            evaluate<T, A extends unknown[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
 
             /**
              * Exposes a function to the browser's global context under the specified name.
@@ -72,7 +73,7 @@ declare global {
              * @param options - Optional settings for exposing the function.
              * @returns A promise that resolves when the function is successfully exposed.
              */
-            exposeFunction<T, A extends any[]>(name: string, fn: (...args: A) => T, options?: ExposeFunctionOptions): Promise<void>;
+            exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => T, options?: ExposeFunctionOptions): Promise<void>;
         }
     }
 }
@@ -81,10 +82,11 @@ declare global {
  * Attaches the current functionality to the specified browser window.
  *
  * @param target - The BrowserWindow instance to which the functionality will be attached.
+ * @param protocolVersion - The protocol version to use.
  */
-export function attach(target: BrowserWindow) {
+export function attach(target: BrowserWindow, protocolVersion?: string) {
     const session = new Session(target.webContents);
-    session.attach('1.3');
+    session.attach(protocolVersion);
     Object.defineProperty(target, 'session', { get: () => session });
 
     const webContents = target.webContents;
@@ -92,7 +94,7 @@ export function attach(target: BrowserWindow) {
     Object.defineProperty(webContents, 'exposeFunction', { value: session.exposeFunction.bind(session) });
 }
 
-async function evaluate<T, A extends any[]>(this: WebContents, fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: any | ((...args: A) => T), ...args: A): Promise<T> {
+async function evaluate<T, A extends unknown[]>(this: WebContents, fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: unknown | ((...args: A) => T), ...args: A): Promise<T> {
     let options: EvaluateOptions | undefined;
     let fn: (...args: A) => T;
     let actualArgs: A;
@@ -176,6 +178,7 @@ async function evaluate<T, A extends any[]>(this: WebContents, fnOrOptions: ((..
                 if (!arg.toString().endsWith('{ [native code] }')) {
                     return `new Function('return ' + ${JSON.stringify(arg.toString())})()`;
                 }
+            // eslint-disable-next-line no-fallthrough
             default:
                 throw new Error(`Unsupported argument type: ${typeof arg}`);
         }
