@@ -1,26 +1,31 @@
 {
   "name": "electron-cdp-utils",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "author": "ntoskrnl7@gmail.com",
   "license": "ISC",
-  "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "build": "tsc && node remove-export.js",
+    "build": "tsc && node remove-export.js && esbuild src/superJSON.ts --bundle --outfile=superJSON.js --platform=node && esbuild src/superJSON.ts --bundle --outfile=window.SuperJSON.js --platform=browser --format=iife --global-name=SuperJSON --minify",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "buffer": "^6.0.3",
     "devtools-protocol": "^0.0.1336433",
     "electron": "^31.3.1",
-    "events": "^3.3.0"
+    "events": "^3.3.0",
+    "superjson": "^2.2.1"
   },
   "devDependencies": {
-    "typescript": "^5.5.3"
+    "@babel/preset-typescript": "^7.24.7",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.5.4"
   },
   "files": [
     "*.js",
     "*.d.ts",
     "README.md"
-  ]
+  ],
+  "esm": {
+    "cjs": true
+  }
 }

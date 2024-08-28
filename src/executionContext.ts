@@ -1,6 +1,6 @@
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { Session } from "./session";
-import { EvaluateOptions } from ".";
+import { EvaluateOptions, SuperJSON } from ".";
 
 
 /**
@@ -86,87 +86,33 @@ export class ExecutionContext {
     }
 
     async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
-        const argsString = args.map(arg => {
-            switch (typeof arg) {
-                case 'string':
-                    return `\`${arg.replace(/`/g, '\\`')}\``;
-                case 'object': {
-                    if (arg === null) {
-                        return 'null';
-                    }
-                    const toObject = (obj: object, depth?: number): object | null => {
-                        if (depth === undefined) {
-                            depth = 1;
-                        }
-                        const toObjectI = (obj: object, current: number) => {
-                            if (current > depth) {
-                                try {
-                                    return JSON.parse(JSON.stringify(obj));
-                                } catch (error) {
-                                    return null;
-                                }
-                            }
-                            const ret: { [key: string]: object | null } = {};
-                            for (const key in Object.getPrototypeOf(obj)) {
-                                const value = (obj as { [key: string]: object })[key];
-                                switch (typeof value) {
-                                    case 'function':
-                                        break;
-                                    case 'object':
-                                        if (value) {
-                                            ret[key] = toObjectI(value, current + 1);
-                                        }
-                                        break;
-                                    default:
-                                        ret[key] = value;
-                                        break;
-                                }
-                            }
-                            for (const key in obj) {
-                                const value = (obj as { [key: string]: object })[key];
-                                switch (typeof value) {
-                                    case 'function':
-                                        break;
-                                    case 'object':
-                                        if (value) {
-                                            ret[key] = toObjectI(value, current + 1);
-                                        }
-                                        break;
-                                    default:
-                                        ret[key] = value;
-                                        break;
-                                }
-                            }
-
-                            if (Object.entries(ret).length === 0 && ret.constructor === Object) {
-                                return obj.toString();
-                            }
-                            return ret;
-                        };
-                        return toObjectI(obj, 1);
-                    };
-                    return JSON.stringify(toObject(arg));
-                }
-                case 'number':
-                case 'bigint':
-                case 'boolean':
-                    return arg.toString();
-                case 'undefined':
-                    return 'undefined';
-                case 'function':
-                    if (!arg.toString().endsWith('{ [native code] }')) {
-                        return `new Function('return ' + ${JSON.stringify(arg.toString())})()`;
-                    }
-                // eslint-disable-next-line no-fallthrough
-                default:
-                    throw new Error(`Unsupported argument type: ${typeof arg}`);
-            }
-        }).join(', ');
-
         const expression = `(async () => {
+            if (window.SuperJSON === undefined) {
+                try {
+                    window.SuperJSON = window.top.SuperJSON;
+                } catch (error) {
+                }
+                if (window.SuperJSON === undefined) {
+                    for (const w of Array.from(window)) {
+                        try {
+                            if (w.SuperJSON) {
+                                window.SuperJSON = w.SuperJSON;
+                                break;
+                            }
+                        } catch (error) {
+                        }
+                    }
+                }
+                if (window.SuperJSON === undefined) {
+                    console.error('window.SuperJSON === undefined');
+                    debugger;
+                }
+            }
+
             const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-            const result = await fn(${argsString});
-            return JSON.stringify(result);
+            const args = SuperJSON.parse(${JSON.stringify(SuperJSON.stringify(args))});
+            const result = await fn(...args);
+            return SuperJSON.stringify(result);
         })();`;
 
         const res = (await this.session.send('Runtime.evaluate', {
@@ -213,6 +159,6 @@ export class ExecutionContext {
             throw error;
         }
 
-        return res.result.value === undefined ? undefined : JSON.parse(res.result.value);
+        return res.result.value === undefined ? undefined : SuperJSON.parse<any>(res.result.value);
     }
 }

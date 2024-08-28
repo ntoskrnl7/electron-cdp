@@ -2,7 +2,8 @@
 import { BrowserWindow, WebContents } from 'electron';
 import { Session as CDPSession, ExposeFunctionOptions, Session } from './session';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
-import { EvaluateOptions } from '.';
+import { EvaluateOptions, SuperJSON } from '.';
+import { readFileSync } from 'fs';
 
 declare global {
     interface Window {
@@ -57,7 +58,7 @@ declare global {
 
             /**
              * Evaluates the provided function with additional options and the given arguments in the context of the current page.
-             * 
+             *
              * @param options Additional options to customize the evaluation.
              * @param fn - The function to be evaluated.
              * @param args - The arguments to pass to the function.
@@ -90,6 +91,21 @@ export function attach(target: BrowserWindow, protocolVersion?: string) {
     Object.defineProperty(target, 'session', { get: () => session });
 
     const webContents = target.webContents;
+
+    const script = readFileSync(require.resolve('./window.SuperJSON')).toString();
+    webContents.executeJavaScript(`${script}; window.SuperJSON = SuperJSON.default;`);
+    session.on('Runtime.executionContextCreated', event => {
+        session.send('Runtime.evaluate', {
+            expression: `${script}; window.SuperJSON = SuperJSON.default;`,
+            contextId: event.context.id,
+            returnByValue: true,
+            awaitPromise: true,
+            silent: true,
+            generatePreview: false,
+            throwOnSideEffect: false,
+            includeCommandLineAPI: false,
+        })
+    })
     Object.defineProperty(webContents, 'evaluate', { value: evaluate.bind(webContents) });
     Object.defineProperty(webContents, 'exposeFunction', { value: session.exposeFunction.bind(session) });
 }
@@ -108,88 +124,13 @@ async function evaluate<T, A extends unknown[]>(this: WebContents, fnOrOptions: 
         actualArgs = args;
     }
 
-    const argsString = actualArgs.map(arg => {
-        switch (typeof arg) {
-            case 'string':
-                return `\`${arg.replace(/`/g, '\\`')}\``;
-            case 'object': {
-                if (arg === null) {
-                    return 'null';
-                }
-                const toObject = (obj: object, depth?: number): object | null => {
-                    if (depth === undefined) {
-                        depth = 1;
-                    }
-                    const toObjectI = (obj: object, current: number) => {
-                        if (current > depth) {
-                            try {
-                                return JSON.parse(JSON.stringify(obj));
-                            } catch (error) {
-                                return null;
-                            }
-                        }
-                        const ret: { [key: string]: object | null } = {};
-                        for (const key in Object.getPrototypeOf(obj)) {
-                            const value = (obj as { [key: string]: object })[key];
-                            switch (typeof value) {
-                                case 'function':
-                                    break;
-                                case 'object':
-                                    if (value) {
-                                        ret[key] = toObjectI(value, current + 1);
-                                    }
-                                    break;
-                                default:
-                                    ret[key] = value;
-                                    break;
-                            }
-                        }
-                        for (const key in obj) {
-                            const value = (obj as { [key: string]: object })[key];
-                            switch (typeof value) {
-                                case 'function':
-                                    break;
-                                case 'object':
-                                    if (value) {
-                                        ret[key] = toObjectI(value, current + 1);
-                                    }
-                                    break;
-                                default:
-                                    ret[key] = value;
-                                    break;
-                            }
-                        }
-                        if (Object.entries(ret).length === 0 && ret.constructor === Object) {
-                            return obj.toString();
-                        }
-                        return ret;
-                    };
-                    return toObjectI(obj, 1);
-                };
-                return JSON.stringify(toObject(arg));
-            }
-            case 'number':
-            case 'bigint':
-            case 'boolean':
-                return arg.toString();
-            case 'undefined':
-                return 'undefined';
-            case 'function':
-                if (!arg.toString().endsWith('{ [native code] }')) {
-                    return `new Function('return ' + ${JSON.stringify(arg.toString())})()`;
-                }
-            // eslint-disable-next-line no-fallthrough
-            default:
-                throw new Error(`Unsupported argument type: ${typeof arg}`);
-        }
-    }).join(', ');
-
     const result = await this.executeJavaScript(`
         (async () => {
             const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-            const result = await fn(${argsString});
-            return JSON.stringify(result);
+            const args = SuperJSON.parse(${JSON.stringify(SuperJSON.stringify(actualArgs))});
+            const result = await fn(...args);
+            return SuperJSON.stringify(result);
         })();`,
         options?.userGesture);
-    return result === undefined ? undefined : JSON.parse(result);
+    return result === undefined ? undefined : SuperJSON.parse<any>(result);
 }

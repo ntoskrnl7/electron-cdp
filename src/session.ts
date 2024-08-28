@@ -91,7 +91,7 @@ export class Session extends EventEmitter<Events> {
 
     /**
      * Exposes a function to the browser's global context.
-     * 
+     *
      * @param name - The name under which the function will be exposed.
      * @param fn - The function to expose.
      * @param options - Options for exposing the function.
