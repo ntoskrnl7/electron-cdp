@@ -108,6 +108,12 @@ export function attach(target: BrowserWindow, protocolVersion?: string) {
     })
     Object.defineProperty(webContents, 'evaluate', { value: evaluate.bind(webContents) });
     Object.defineProperty(webContents, 'exposeFunction', { value: session.exposeFunction.bind(session) });
+
+    return session;
+}
+
+export function isAttached(target: BrowserWindow) {
+    return target.session instanceof Session;
 }
 
 async function evaluate<T, A extends unknown[]>(this: WebContents, fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: unknown | ((...args: A) => T), ...args: A): Promise<T> {
@@ -117,7 +123,7 @@ async function evaluate<T, A extends unknown[]>(this: WebContents, fnOrOptions: 
 
     if (typeof fnOrOptions === 'function') {
         fn = fnOrOptions as (...args: A) => T;
-        actualArgs = [fnOrArg0, ...args] as A;
+        actualArgs = fnOrArg0 === undefined ? args : [fnOrArg0, ...args] as A;
     } else {
         options = fnOrOptions as EvaluateOptions;
         fn = fnOrArg0 as (...args: A) => T;

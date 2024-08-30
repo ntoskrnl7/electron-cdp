@@ -75,7 +75,7 @@ export class ExecutionContext {
 
         if (typeof fnOrOptions === 'function') {
             fn = fnOrOptions as (...args: A) => T;
-            actualArgs = [fnOrArg0, ...args] as A;
+            actualArgs = fnOrArg0 === undefined ? args : [fnOrArg0, ...args] as A;
         } else {
             options = fnOrOptions as EvaluateOptions;
             fn = fnOrArg0 as (...args: A) => T;
