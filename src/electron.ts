@@ -1,6 +1,6 @@
 
-import { BrowserWindow, WebContents } from 'electron';
-import { Session as CDPSession, ExposeFunctionOptions, Session } from './session';
+import { WebContents } from 'electron';
+import { ExposeFunctionOptions, Session as CDPSession } from './session';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { EvaluateOptions, SuperJSON } from '.';
 import { readFileSync } from 'fs';
@@ -37,16 +37,15 @@ declare global {
 
     // eslint-disable-next-line @typescript-eslint/no-namespace
     namespace Electron {
-        interface BrowserWindow {
-            /**
-             * Retrieves the current CDP (Chrome DevTools Protocol) session associated with the browser window.
-             *
-             * @returns The CDPSession object for the browser window.
-             */
-            get session(): CDPSession;
-        }
-
         interface WebContents {
+
+            /**
+             * Retrieves the current CDP (Chrome DevTools Protocol) session associated with the web contents.
+             *
+             * @returns The CDPSession object for the web contents.
+             */
+            get cdp(): CDPSession;
+
             /**
              * Evaluates the provided function with the given arguments in the context of the current page.
              *
@@ -82,18 +81,17 @@ declare global {
 /**
  * Attaches the current functionality to the specified browser window.
  *
- * @param target - The BrowserWindow instance to which the functionality will be attached.
+ * @param target - The WebContents instance to which the functionality will be attached.
  * @param protocolVersion - The protocol version to use.
  */
-export function attach(target: BrowserWindow, protocolVersion?: string) {
-    const session = new Session(target.webContents);
+export function attach(target: WebContents, protocolVersion?: string) {
+    const session = new CDPSession(target);
     session.attach(protocolVersion);
-    Object.defineProperty(target, 'session', { get: () => session });
 
-    const webContents = target.webContents;
+    Object.defineProperty(target, 'cdp', { get: () => session });
 
     const script = readFileSync(require.resolve('./window.SuperJSON')).toString();
-    webContents.executeJavaScript(`${script}; window.SuperJSON = SuperJSON.default;`);
+    target.executeJavaScript(`${script}; window.SuperJSON = SuperJSON.default;`);
     session.on('Runtime.executionContextCreated', event => {
         session.send('Runtime.evaluate', {
             expression: `${script}; window.SuperJSON = SuperJSON.default;`,
@@ -106,14 +104,14 @@ export function attach(target: BrowserWindow, protocolVersion?: string) {
             includeCommandLineAPI: false,
         })
     })
-    Object.defineProperty(webContents, 'evaluate', { value: evaluate.bind(webContents) });
-    Object.defineProperty(webContents, 'exposeFunction', { value: session.exposeFunction.bind(session) });
+    Object.defineProperty(target, 'evaluate', { value: evaluate.bind(target) });
+    Object.defineProperty(target, 'exposeFunction', { value: session.exposeFunction.bind(session) });
 
     return session;
 }
 
-export function isAttached(target: BrowserWindow) {
-    return target.session instanceof Session;
+export function isAttached(target: WebContents) {
+    return target.cdp instanceof CDPSession;
 }
 
 async function evaluate<T, A extends unknown[]>(this: WebContents, fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: unknown | ((...args: A) => T), ...args: A): Promise<T> {
