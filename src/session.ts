@@ -131,6 +131,8 @@ export class Session extends EventEmitter<Events> {
                             if (typeof options.withReturnValue === 'object') {
                                 setTimeout(() => clearInterval(h), options.withReturnValue.timeout);
                             }
+                        } else {
+                            resolve(undefined);
                         }
                     } catch (error) {
                         reject(error);
