@@ -7,6 +7,9 @@ import { readFileSync } from 'fs';
 
 declare global {
     interface Window {
+
+        SuperJSON: SuperJSON;
+
         /**
          * Callback invocation sequence.
          */
@@ -103,7 +106,8 @@ export function attach(target: WebContents, protocolVersion?: string) {
             throwOnSideEffect: false,
             includeCommandLineAPI: false,
         })
-    })
+    });
+
     Object.defineProperty(target, 'evaluate', { value: evaluate.bind(target) });
     Object.defineProperty(target, 'exposeFunction', { value: session.exposeFunction.bind(session) });
 

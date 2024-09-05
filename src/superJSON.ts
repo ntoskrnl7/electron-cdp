@@ -95,4 +95,14 @@ SuperJSON.registerCustom<Buffer, number[]>(
     },
     'Buffer'
 );
+
+SuperJSON.registerCustom<Uint8Array, number[]>(
+    {
+        isApplicable: (v): v is Uint8Array => v instanceof Uint8Array,
+        serialize: (v) => [...v],
+        deserialize: (v) => Uint8Array.from(v),
+    },
+    'Uint8Array'
+);
+
 export default SuperJSON;

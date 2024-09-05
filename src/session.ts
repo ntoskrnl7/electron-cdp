@@ -3,6 +3,7 @@ import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import { Debugger, WebContents } from 'electron';
 import { ExecutionContext } from './executionContext';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
+import { SuperJSON } from '.';
 
 /**
  * Options for sending commands.
@@ -110,7 +111,7 @@ export class Session extends EventEmitter<Events> {
                             window._callSeq = BigInt(0);
                         }
                         const callSequence = String(window._callSeq++);
-                        window._callback(JSON.stringify({ executionContextId, callSequence, name, args }));
+                        window._callback(window.SuperJSON.stringify({ executionContextId, callSequence, name, args }));
                         if (options?.withReturnValue) {
                             const h = setInterval(() => {
                                 try {
@@ -155,7 +156,7 @@ export class Session extends EventEmitter<Events> {
             try {
                 switch (event.name) {
                     case '_callback': {
-                        const payload: { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A } = JSON.parse(event.payload);
+                        const payload: { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A } = SuperJSON.parse(event.payload);
                         if (payload.name === name) {
                             const context = payload.executionContextId ? new ExecutionContext(this, payload.executionContextId) : new ExecutionContext(this, event.executionContextId);
                             try {
