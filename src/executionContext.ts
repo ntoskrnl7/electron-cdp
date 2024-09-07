@@ -115,7 +115,7 @@ export class ExecutionContext {
             return SuperJSON.stringify(result);
         })();`;
 
-        const res = (await this.session.send('Runtime.evaluate', {
+        const res = await this.session.send('Runtime.evaluate', {
             expression,
             contextId: this.id,
             returnByValue: true,
@@ -126,7 +126,7 @@ export class ExecutionContext {
             includeCommandLineAPI: false,
             userGesture: options?.userGesture,
             timeout: options?.timeout,
-        }));
+        });
 
         if (res.exceptionDetails) {
             const error: { [key: string]: unknown } = {};
@@ -159,6 +159,6 @@ export class ExecutionContext {
             throw error;
         }
 
-        return res.result.value === undefined ? undefined : SuperJSON.parse<any>(res.result.value);
+        return res.result?.value === undefined ? undefined : SuperJSON.parse<any>(res.result.value);
     }
 }

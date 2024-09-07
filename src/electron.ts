@@ -89,9 +89,8 @@ declare global {
  */
 export function attach(target: WebContents, protocolVersion?: string) {
     const session = new CDPSession(target);
-    session.attach(protocolVersion);
 
-    Object.defineProperty(target, 'cdp', { get: () => session });
+    session.attach(protocolVersion);
 
     const script = readFileSync(require.resolve('./window.SuperJSON')).toString();
     target.executeJavaScript(`${script}; window.SuperJSON = SuperJSON.default;`);
@@ -110,6 +109,8 @@ export function attach(target: WebContents, protocolVersion?: string) {
 
     Object.defineProperty(target, 'evaluate', { value: evaluate.bind(target) });
     Object.defineProperty(target, 'exposeFunction', { value: session.exposeFunction.bind(session) });
+
+    Object.defineProperty(target, 'cdp', { get: () => session });
 
     return session;
 }
