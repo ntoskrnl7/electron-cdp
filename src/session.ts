@@ -250,15 +250,34 @@ export class Session extends EventEmitter<Events> {
 
         this.on('Runtime.bindingCalled', bindingCalled);
 
-        this.webContents.on('destroyed', () => this.removeExposedFunction(name).catch(console.warn));
+        this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
     }
 
+    /**
+     * Removes an exposed function from the browser's global context.
+     *
+     * @param name - The name of the function to remove.
+     * @returns A promise that resolves when the function has been removed.
+     *
+     * This function checks if a function is exposed using the `name` provided.
+     * If it is, it removes the function from the internal storage and unbinds it from the global context.
+     */
     async removeExposedFunction(name: string) {
         const entry = this.#exposeFunctions.get(name);
         if (entry) {
             this.#exposeFunctions.delete(name);
             await this.#removeExposedFunction(name, entry);
         }
+    }
+
+    /**
+     * Checks if a function is exposed to the browser's global context.
+     *
+     * @param name - The name of the function to check.
+     * @returns `true` if the function is currently exposed, otherwise `false`.
+     */
+    isFunctionExposed(name: string) {
+        return this.#exposeFunctions.has(name);
     }
 
     async #removeExposedFunction(
@@ -269,7 +288,9 @@ export class Session extends EventEmitter<Events> {
         }) {
         this.off('executionContextCreated', entry.executionContextCreated);
         this.off('Runtime.bindingCalled', entry.bindingCalled);
-        // @ts-expect-error : window[name]
-        await Promise.all(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete window[name], name)));
+        if (!this.webContents.isDestroyed()) {
+            // @ts-expect-error : window[name]
+            await Promise.all(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete window[name], name)));
+        }
     }
 }
