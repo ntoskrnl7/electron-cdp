@@ -1,6 +1,6 @@
 {
   "name": "electron-cdp-utils",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "author": "ntoskrnl7@gmail.com",
   "license": "ISC",
   "main": "index.js",

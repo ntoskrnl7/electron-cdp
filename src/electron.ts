@@ -87,13 +87,23 @@ declare global {
  * @param target - The WebContents instance to which the functionality will be attached.
  * @param protocolVersion - The protocol version to use.
  */
-export function attach(target: WebContents, protocolVersion?: string) {
+export async function attach(target: WebContents, protocolVersion?: string) {
     const session = new CDPSession(target);
 
     session.attach(protocolVersion);
 
     const script = readFileSync(require.resolve('./window.SuperJSON')).toString();
-    target.executeJavaScript(`${script}; window.SuperJSON = SuperJSON.default;`);
+
+    await session.send('Runtime.evaluate', {
+        expression: `${script}; window.SuperJSON = SuperJSON.default;`,
+        returnByValue: true,
+        awaitPromise: true,
+        silent: true,
+        generatePreview: false,
+        throwOnSideEffect: false,
+        includeCommandLineAPI: false,
+    });
+
     session.on('Runtime.executionContextCreated', event => {
         session.send('Runtime.evaluate', {
             expression: `${script}; window.SuperJSON = SuperJSON.default;`,
@@ -104,7 +114,7 @@ export function attach(target: WebContents, protocolVersion?: string) {
             generatePreview: false,
             throwOnSideEffect: false,
             includeCommandLineAPI: false,
-        })
+        }).catch(console.error);
     });
 
     Object.defineProperty(target, 'evaluate', { value: evaluate.bind(target) });
