@@ -167,8 +167,6 @@ export class Session extends EventEmitter<Events> {
                 });
         }
 
-        this.webContents.evaluate(attachFunction, name, options);
-
         const executionContextCreated = async (context: ExecutionContext) => {
             try {
                 await context.evaluate(attachFunction, name, options, context.id);
@@ -251,6 +249,8 @@ export class Session extends EventEmitter<Events> {
         this.on('Runtime.bindingCalled', bindingCalled);
 
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
+
+        await this.webContents.evaluate(attachFunction, name, options);
     }
 
     /**
