@@ -86,7 +86,8 @@ export class ExecutionContext {
     }
 
     async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
-        const expression = `(async () => {
+        const expression = `
+        (async () => {
             if (window.SuperJSON === undefined) {
                 try {
                     window.SuperJSON = window.top.SuperJSON;
@@ -102,6 +103,17 @@ export class ExecutionContext {
                         } catch (error) {
                         }
                     }
+                }
+                if (window.SuperJSON === undefined) {
+                    await new Promise(resolve => {
+                        const h = setInterval(() => {
+                            if (window.SuperJSON !== undefined) {
+                            resolve();
+                            clearInterval(h);
+                            }
+                        });
+                        setTimeout(() => clearInterval(h), ${options?.timeout ? options?.timeout : 5000});
+                    });
                 }
                 if (window.SuperJSON === undefined) {
                     console.error('window.SuperJSON === undefined');

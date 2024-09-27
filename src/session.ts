@@ -3,7 +3,7 @@ import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import { Debugger, WebContents } from 'electron';
 import { ExecutionContext } from './executionContext';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
-import { SuperJSON } from '.';
+import { EvaluateOptions, SuperJSON } from '.';
 
 /**
  * Options for sending commands.
@@ -42,6 +42,49 @@ export class Session extends EventEmitter<Events> {
         bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => Promise<void>;
     }> = new Map();
 
+    /**
+     * Evaluates the provided function with the given arguments in the context of the current page.
+     *
+     * @param fn - The function to be evaluated.
+     * @param args - The arguments to pass to the function.
+     * @returns A promise that resolves with the result of the function.
+     */
+    evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
+
+    /**
+     * Evaluates the provided function with additional options and the given arguments in the context of the current page.
+     *
+     * @param options Additional options to customize the evaluation.
+     * @param fn - The function to be evaluated.
+     * @param args - The arguments to pass to the function.
+     * @returns A promise that resolves with the result of the function.
+     */
+    evaluate<T, A extends unknown[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
+
+    /**
+     * Exposes a function to the browser's global context under the specified name.
+     *
+     * @param name - The name under which the function will be exposed.
+     * @param fn - The function to expose.
+     * @param options - Optional settings for exposing the function.
+     * @returns A promise that resolves when the function is successfully exposed.
+     */
+    async evaluate<T, A extends unknown[]>(fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: unknown | ((...args: A) => T), ...args: A): Promise<T> {
+        let options: EvaluateOptions | undefined;
+        let fn: (...args: A) => T;
+        let actualArgs: A;
+        const ctx = new ExecutionContext(this);
+        if (typeof fnOrOptions === 'function') {
+            fn = fnOrOptions as (...args: A) => T;
+            actualArgs = fnOrArg0 === undefined ? args : [fnOrArg0, ...args] as A;
+            return ctx.evaluate(fn, ...actualArgs);
+        } else {
+            options = fnOrOptions as EvaluateOptions;
+            fn = fnOrArg0 as (...args: A) => T;
+            actualArgs = args;
+            return ctx.evaluate(options, fn, ...actualArgs);
+        }
+    }
 
     /**
      * Creates a new Session instance.
