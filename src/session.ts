@@ -1,9 +1,44 @@
 import EventEmitter from 'events';
+import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import { Debugger, WebContents } from 'electron';
-import { ExecutionContext } from './executionContext';
-import { Protocol } from 'devtools-protocol/types/protocol.d';
-import { EvaluateOptions, SuperJSON } from '.';
+import { EvaluateOptions, SuperJSON, ExecutionContext } from '.';
+
+declare global {
+    interface Window {
+        /**
+         * SuperJSON.
+         */
+        SuperJSON: SuperJSON;
+
+        /**
+         * Callback invocation sequence.
+         */
+        _callSeq?: bigint;
+
+        /**
+         * Execution context identifier.
+         *
+         * (Main frame is undefined.)
+         */
+        _executionContextId?: Protocol.Runtime.ExecutionContextId;
+
+        /**
+         * Method used internally by the exposeFunction method.
+         */
+        _callback(payload: string): void;
+
+        /**
+         * Property used internally by the exposeFunction method.
+         */
+        _returnValues?: { [key: string]: Awaited<unknown> };
+
+        /**
+         * Property used internally by the exposeFunction method.
+         */
+        _returnErrors?: { [key: string]: Awaited<unknown> };
+    }
+}
 
 /**
  * Options for sending commands.
@@ -41,6 +76,15 @@ export class Session extends EventEmitter<Events> {
         executionContextCreated: (context: ExecutionContext) => Promise<void>;
         bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => Promise<void>;
     }> = new Map();
+
+    /**
+     * Retrieves the list of execution contexts.
+     *
+     * @returns A list of the current execution contexts.
+     */
+    get executionContexts() {
+        return this.#executionContexts;
+    }
 
     /**
      * Evaluates the provided function with the given arguments in the context of the current page.
@@ -293,7 +337,7 @@ export class Session extends EventEmitter<Events> {
 
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
 
-        await this.webContents.evaluate(attachFunction, name, options);
+        await this.evaluate(attachFunction, name, options);
     }
 
     /**

@@ -1,7 +1,5 @@
 import { Protocol } from 'devtools-protocol/types/protocol.d';
-import { Session } from "./session";
-import { EvaluateOptions, SuperJSON } from ".";
-
+import { EvaluateOptions, Session, SuperJSON } from ".";
 
 /**
  * Represents an execution context in the browser.
