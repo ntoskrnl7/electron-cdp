@@ -143,6 +143,10 @@ async function evaluate<T, A extends unknown[]>(this: WebContents, fnOrOptions: 
         actualArgs = args;
     }
 
+    if (this.isLoadingMainFrame()) {
+        await new Promise(resolve => this.on('did-finish-load', resolve));
+    }
+
     const result = await this.executeJavaScript(`
         (async () => {
             const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
