@@ -1,5 +1,8 @@
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { EvaluateOptions, Session, SuperJSON } from ".";
+import { readFileSync } from 'fs';
+
+const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
 
 /**
  * Represents an execution context in the browser.
@@ -84,46 +87,56 @@ export class ExecutionContext {
     }
 
     async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
-        const expression = `
-        (async () => {
-            if (window.SuperJSON === undefined) {
-                try {
-                    window.SuperJSON = window.top.SuperJSON;
-                } catch (error) {
-                }
+        const expression = (this.session.webContents.cdp ? `
+            (async () => {
                 if (window.SuperJSON === undefined) {
-                    for (const w of Array.from(window)) {
-                        try {
-                            if (w.SuperJSON) {
-                                window.SuperJSON = w.SuperJSON;
-                                break;
+                    try {
+                        window.SuperJSON = window.top.SuperJSON;
+                    } catch (error) {
+                    }
+                    if (window.SuperJSON === undefined) {
+                        for (const w of Array.from(window)) {
+                            try {
+                                if (w.SuperJSON) {
+                                    window.SuperJSON = w.SuperJSON;
+                                    break;
+                                }
+                            } catch (error) {
                             }
-                        } catch (error) {
                         }
                     }
-                }
-                if (window.SuperJSON === undefined) {
-                    await new Promise(resolve => {
-                        const h = setInterval(() => {
-                            if (window.SuperJSON !== undefined) {
-                            resolve();
-                            clearInterval(h);
-                            }
+                    if (window.SuperJSON === undefined) {
+                        await new Promise(resolve => {
+                            const h = setInterval(() => {
+                                if (window.SuperJSON !== undefined) {
+                                clearInterval(h);
+                                resolve();
+                                }
+                            });
+                            setTimeout(() => {
+                                clearInterval(h);
+                                resolve();
+                            }, ${options?.timeout});
                         });
-                        setTimeout(() => clearInterval(h), ${options?.timeout ? options?.timeout : 5000});
-                    });
-                }
-                if (window.SuperJSON === undefined) {
-                    console.error('window.SuperJSON === undefined');
-                    debugger;
-                }
-            }
-
-            const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-            const args = SuperJSON.parse(${JSON.stringify(SuperJSON.stringify(args))});
-            const result = await fn(...args);
-            return SuperJSON.stringify(result);
-        })();`;
+                    }
+                    if (window.SuperJSON === undefined) {
+                        console.error('window.SuperJSON === undefined');
+                        debugger;
+                    }
+                }`
+            :
+            `
+            ${SuperJSONScript}; window.SuperJSON = SuperJSON.default;
+            (async () => {
+            `)
+            +
+            `
+                const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
+                const args = SuperJSON.parse(${JSON.stringify(SuperJSON.stringify(args))});
+                const result = await fn(...args);
+                return SuperJSON.stringify(result);
+            })();
+            `;
 
         const res = await this.session.send('Runtime.evaluate', {
             expression,
