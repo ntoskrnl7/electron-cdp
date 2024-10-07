@@ -116,7 +116,7 @@ export class ExecutionContext {
                             setTimeout(() => {
                                 clearInterval(h);
                                 resolve();
-                            }, ${options?.timeout ? options?.timeout : 5000});
+                            }, ${options?.timeout ? options.timeout : 5000});
                         });
                     }
                     if (window.SuperJSON === undefined) {
