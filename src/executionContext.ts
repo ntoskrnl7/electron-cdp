@@ -116,11 +116,12 @@ export class ExecutionContext {
                             setTimeout(() => {
                                 clearInterval(h);
                                 resolve();
-                            }, ${options?.timeout});
+                            }, ${options?.timeout ? options?.timeout : 5000});
                         });
                     }
                     if (window.SuperJSON === undefined) {
                         console.error('window.SuperJSON === undefined');
+                        throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it.');
                         debugger;
                     }
                 }`
