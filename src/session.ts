@@ -4,6 +4,9 @@ import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import { Debugger, WebContents } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext } from '.';
 
+import { readFileSync } from 'fs';
+const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
+
 declare global {
     interface Window {
         /**
@@ -194,6 +197,54 @@ export class Session extends EventEmitter<Events> {
         if (!this.#debugger.isAttached()) {
             this.#debugger.attach(protocolVersion);
         }
+    }
+    /**
+     * Ensures that the SuperJSON library is loaded and available
+     * for use within the web contents context.
+     *
+     * This method checks if SuperJSON is already loaded by inspecting
+     * the `hasSuperJSON` flag on the web contents. If it is not loaded,
+     * the method loads SuperJSON by evaluating a script in the browser context.
+     *
+     * Once SuperJSON is loaded, it sets up a listener to ensure that
+     * SuperJSON is reloaded in any newly created execution contexts.
+     *
+     * @returns A promise that resolves when SuperJSON has been successfully loaded.
+     *
+     * @throws Any errors that occur during the execution of the script
+     * will be logged to the console.
+     */
+    async enableSuperJSON() {
+        if (this.webContents.hasSuperJSON) {
+            return;
+        }
+
+        await this.send('Runtime.evaluate', {
+            expression: `${SuperJSONScript}; window.SuperJSON = SuperJSON.default;`,
+            throwOnSideEffect: false,
+            awaitPromise: true,
+            replMode: false,
+            returnByValue: false,
+            generatePreview: false,
+            silent: true,
+            includeCommandLineAPI: false,
+        });
+
+        this.on('Runtime.executionContextCreated', event => {
+            this.send('Runtime.evaluate', {
+                expression: `${SuperJSONScript}; window.SuperJSON = SuperJSON.default;`,
+                contextId: event.context.id,
+                throwOnSideEffect: false,
+                awaitPromise: true,
+                replMode: false,
+                returnByValue: false,
+                generatePreview: false,
+                silent: true,
+                includeCommandLineAPI: false,
+            }).catch(console.error);
+        });
+
+        this.webContents.hasSuperJSON = true;
     }
 
     /**

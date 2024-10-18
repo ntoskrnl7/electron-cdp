@@ -87,7 +87,7 @@ export class ExecutionContext {
     }
 
     async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
-        const expression = (this.session.webContents.cdp ? `
+        const expression = (this.session.webContents.hasSuperJSON  ? `
             (async () => {
                 if (window.SuperJSON === undefined) {
                     try {
@@ -138,18 +138,15 @@ export class ExecutionContext {
                 return SuperJSON.stringify(result);
             })();
             `;
-
         const res = await this.session.send('Runtime.evaluate', {
             expression,
             contextId: this.id,
-            returnByValue: true,
-            awaitPromise: true,
-            silent: true,
-            generatePreview: false,
             throwOnSideEffect: false,
-            includeCommandLineAPI: false,
-            userGesture: options?.userGesture,
-            timeout: options?.timeout,
+            awaitPromise: true,
+            replMode: false,
+            returnByValue: false,
+            generatePreview: false,
+            ...options
         });
 
         if (res.exceptionDetails) {

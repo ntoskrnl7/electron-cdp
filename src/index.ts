@@ -4,10 +4,7 @@ export { Protocol };
 import SuperJSON from './superJSON';
 export { SuperJSON };
 
-export interface EvaluateOptions {
-    userGesture?: boolean | undefined,
-    timeout?: number | undefined
-}
+export type EvaluateOptions = Omit<Protocol.Runtime.EvaluateRequest, 'contextId' | 'uniqueContextId' | 'expression' | 'throwOnSideEffect' | 'awaitPromise' | 'replMode' | 'returnByValue' | 'generatePreview' | 'serializationOptions' | 'objectGroup'>;
 
 export * from './electron';
 export * from './session';
