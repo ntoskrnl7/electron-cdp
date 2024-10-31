@@ -274,7 +274,7 @@ export class Session extends EventEmitter<Events> {
                         if (window._callSeq === undefined) {
                             window._callSeq = BigInt(0);
                         }
-                        const callSequence = String(window._callSeq++);
+                        const callSequence = `${window._callSeq++}-${Math.random()}`;
                         window._callback(window.SuperJSON.stringify({ executionContextId, callSequence, name, args }));
                         if (options?.withReturnValue) {
                             const h = setInterval(() => {
