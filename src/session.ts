@@ -21,8 +21,6 @@ declare global {
 
         /**
          * Execution context identifier.
-         *
-         * (Main frame is undefined.)
          */
         _executionContextId?: Protocol.Runtime.ExecutionContextId;
 
@@ -56,7 +54,7 @@ export declare interface CommandOptions {
 export declare type Events = {
     [Property in keyof ProtocolMapping.Events]: ProtocolMapping.Events[Property];
 } & {
-    'executionContextCreated': [ExecutionContext];
+    'execution-context-created': [ExecutionContext];
 };
 
 /**
@@ -72,10 +70,10 @@ export interface ExposeFunctionOptions {
 export class Session extends EventEmitter<Events> {
 
     readonly webContents: WebContents;
-    #debugger: Debugger;
-    #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
+    readonly #debugger: Debugger;
+    readonly #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
 
-    #exposeFunctions: Map<string, {
+    readonly #exposeFunctions: Map<string, {
         executionContextCreated: (context: ExecutionContext) => Promise<void>;
         bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => Promise<void>;
     }> = new Map();
@@ -126,7 +124,7 @@ export class Session extends EventEmitter<Events> {
             actualArgs = fnOrArg0 === undefined ? args : [fnOrArg0, ...args] as A;
             return ctx.evaluate(fn, ...actualArgs);
         } else {
-            options = fnOrOptions as EvaluateOptions;
+            options = fnOrOptions;
             fn = fnOrArg0 as (...args: A) => T;
             actualArgs = args;
             return ctx.evaluate(options, fn, ...actualArgs);
@@ -149,12 +147,11 @@ export class Session extends EventEmitter<Events> {
                     const event = params as Protocol.Runtime.ExecutionContextCreatedEvent;
                     const ctx = new ExecutionContext(this, event.context);
                     this.#executionContexts.set(event.context.id, ctx);
-                    this.emit('executionContextCreated', ctx);
+                    this.emit('execution-context-created', ctx);
                     break;
                 }
                 case 'Runtime.executionContextDestroyed':
-                    const event = params as Protocol.Runtime.ExecutionContextDestroyedEvent;
-                    this.#executionContexts.delete(event.executionContextId);
+                    this.#executionContexts.delete((params as Protocol.Runtime.ExecutionContextDestroyedEvent).executionContextId);
                     break;
                 case 'Runtime.executionContextsCleared':
                     this.#executionContexts.clear();
@@ -261,7 +258,7 @@ export class Session extends EventEmitter<Events> {
      * @param fn - The function to expose.
      * @param options - Options for exposing the function.
      */
-    async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => T, options?: ExposeFunctionOptions) {
+    async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
         await this.send('Runtime.addBinding', { name: '_callback' });
         const attachFunction = (name: string, options?: ExposeFunctionOptions, executionContextId?: Protocol.Runtime.ExecutionContextId) => {
 
@@ -317,60 +314,57 @@ export class Session extends EventEmitter<Events> {
 
         const bindingCalled = async (event: Protocol.Runtime.BindingCalledEvent) => {
             try {
-                switch (event.name) {
-                    case '_callback': {
-                        const payload: { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A } = SuperJSON.parse(event.payload);
-                        if (payload.name === name) {
-                            if (payload.executionContextId === undefined) {
-                                payload.executionContextId = event.executionContextId;
+                if (event.name === '_callback') {
+                    const payload: { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A } = SuperJSON.parse(event.payload);
+                    if (payload.name === name) {
+                        if (payload.executionContextId === undefined) {
+                            payload.executionContextId = event.executionContextId;
+                        }
+                        if (payload.executionContextId === undefined) {
+                            console.error(`invalid context id : (payload: ${event.payload})`);
+                            return;
+                        }
+                        if (!this.#executionContexts.has(payload.executionContextId)) {
+                            console.warn(`context not found: (id: ${payload.executionContextId}, payload: ${event.payload})`);
+                            this.#executionContexts.set(payload.executionContextId, new ExecutionContext(this, payload.executionContextId));
+                        }
+                        const context = this.#executionContexts.get(payload.executionContextId);
+                        if (context === undefined) {
+                            console.error(`invalid context : (payload, ${event.payload})`);
+                            return;
+                        }
+                        try {
+                            const ret = await fn(...payload.args);
+                            if (options?.withReturnValue) {
+                                await context.evaluate((id, seq, ret) => {
+                                    if (window._executionContextId === undefined) {
+                                        window._executionContextId = id;
+                                    } else {
+                                        console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
+                                    }
+                                    if (window._returnValues === undefined) {
+                                        window._returnValues = {};
+                                    }
+                                    window._returnValues[seq] = ret;
+                                }, event.executionContextId, payload.callSequence, ret);
                             }
-                            if (payload.executionContextId === undefined) {
-                                console.error(`invalid context id : (payload: ${event.payload})`);
-                                return;
-                            }
-                            if (!this.#executionContexts.has(payload.executionContextId)) {
-                                console.warn(`context not found: (id: ${payload.executionContextId}, payload: ${event.payload})`);
-                                this.#executionContexts.set(payload.executionContextId, new ExecutionContext(this, payload.executionContextId));
-                            }
-                            const context = this.#executionContexts.get(payload.executionContextId);
-                            if (context === undefined) {
-                                console.error(`invalid context : (payload, ${event.payload})`);
-                                return;
-                            }
-                            try {
-                                const ret = await fn(...payload.args);
+                        } catch (error) {
+                            if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                                 if (options?.withReturnValue) {
-                                    await context.evaluate((id, seq, ret) => {
+                                    await context.evaluate((id, seq, error) => {
                                         if (window._executionContextId === undefined) {
                                             window._executionContextId = id;
                                         } else {
                                             console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
                                         }
-                                        if (window._returnValues === undefined) {
-                                            window._returnValues = {};
+                                        if (window._returnErrors === undefined) {
+                                            window._returnErrors = {};
                                         }
-                                        window._returnValues[seq] = ret;
-                                    }, event.executionContextId, payload.callSequence, ret);
-                                }
-                            } catch (error) {
-                                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                                    if (options?.withReturnValue) {
-                                        await context.evaluate((id, seq, error) => {
-                                            if (window._executionContextId === undefined) {
-                                                window._executionContextId = id;
-                                            } else {
-                                                console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
-                                            }
-                                            if (window._returnErrors === undefined) {
-                                                window._returnErrors = {};
-                                            }
-                                            window._returnErrors[seq] = error;
-                                        }, event.executionContextId, payload.callSequence, error);
-                                    }
+                                        window._returnErrors[seq] = error;
+                                    }, event.executionContextId, payload.callSequence, error);
                                 }
                             }
                         }
-                        break;
                     }
                 }
             } catch (error) {
@@ -382,7 +376,7 @@ export class Session extends EventEmitter<Events> {
 
         this.#exposeFunctions.set(name, { executionContextCreated, bindingCalled });
 
-        this.on('executionContextCreated', executionContextCreated);
+        this.on('execution-context-created', executionContextCreated);
 
         this.on('Runtime.bindingCalled', bindingCalled);
 
@@ -424,7 +418,7 @@ export class Session extends EventEmitter<Events> {
             executionContextCreated: (context: ExecutionContext) => Promise<void>;
             bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => Promise<void>;
         }) {
-        this.off('executionContextCreated', entry.executionContextCreated);
+        this.off('execution-context-created', entry.executionContextCreated);
         this.off('Runtime.bindingCalled', entry.bindingCalled);
         if (!this.webContents.isDestroyed()) {
             // @ts-expect-error : window[name]

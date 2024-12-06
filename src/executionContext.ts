@@ -37,13 +37,14 @@ export class ExecutionContext {
 
     constructor(session: Session, idOrDescription?: Protocol.Runtime.ExecutionContextId | Protocol.Runtime.ExecutionContextDescription) {
         this.session = session;
-        if (idOrDescription) {
-            if (typeof idOrDescription === 'number') {
-                this.id = idOrDescription;
-            } else if ('id' in idOrDescription) {
-                this.id = idOrDescription.id;
-                this.description = idOrDescription;
-            }
+        if (idOrDescription === undefined) {
+            return;
+        }
+        if (typeof idOrDescription === 'number') {
+            this.id = idOrDescription;
+        } else if ('id' in idOrDescription) {
+            this.id = idOrDescription.id;
+            this.description = idOrDescription;
         }
     }
 
@@ -78,7 +79,7 @@ export class ExecutionContext {
             fn = fnOrOptions as (...args: A) => T;
             actualArgs = fnOrArg0 === undefined ? args : [fnOrArg0, ...args] as A;
         } else {
-            options = fnOrOptions as EvaluateOptions;
+            options = fnOrOptions;
             fn = fnOrArg0 as (...args: A) => T;
             actualArgs = args;
         }
@@ -87,7 +88,7 @@ export class ExecutionContext {
     }
 
     async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
-        const expression = (this.session.webContents.hasSuperJSON  ? `
+        const expression = (this.session.webContents.hasSuperJSON ? `
             (async () => {
                 if (window.SuperJSON === undefined) {
                     try {
@@ -116,7 +117,7 @@ export class ExecutionContext {
                             setTimeout(() => {
                                 clearInterval(h);
                                 resolve();
-                            }, ${options?.timeout ? options.timeout : 5000});
+                            }, ${options?.timeout ?? 5000});
                         });
                     }
                     if (window.SuperJSON === undefined) {
