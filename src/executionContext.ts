@@ -1,8 +1,40 @@
 import { Protocol } from 'devtools-protocol/types/protocol.d';
-import { EvaluateOptions, Session, SuperJSON } from ".";
+import { EvaluateOptions, Session } from ".";
 import { readFileSync } from 'fs';
+import { applyGlobal } from './global';
 
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
+
+function convertExceptionDetailsToError(exceptionDetails: Protocol.Runtime.ExceptionDetails) {
+    const error: { [key: string]: unknown } = {};
+    if (exceptionDetails.exception) {
+        if (exceptionDetails.exception.preview) {
+            exceptionDetails.exception.preview.properties.forEach(prop => {
+                switch (prop.type) {
+                    case 'number':
+                        error[prop.name] = Number(prop.value);
+                        break;
+                    case 'string':
+                        error[prop.name] = prop.value;
+                        break;
+                }
+            });
+            if (exceptionDetails.exception.preview.description) {
+                error['description'] = exceptionDetails.exception.preview.description;
+            }
+        } else {
+            if (exceptionDetails.exception.className) {
+                error['className'] = exceptionDetails.exception.className;
+            }
+            if (exceptionDetails.exception.description) {
+                error['description'] = exceptionDetails.exception.description;
+            }
+        }
+    } else {
+        error['text'] = exceptionDetails.text;
+    }
+    return error;
+}
 
 /**
  * Represents an execution context in the browser.
@@ -70,21 +102,17 @@ export class ExecutionContext {
      */
     async evaluate<T, A extends unknown[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
 
-    async evaluate<T, A extends unknown[]>(fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: unknown | ((...args: A) => T), ...args: A): Promise<T> {
-        let options: EvaluateOptions | undefined;
-        let fn: (...args: A) => T;
-        let actualArgs: A;
-
+    async evaluate<R, F extends (...args: ARGS) => R, ARG_0, ARGS_OTHER extends unknown[], ARGS extends [ARG_0, ...ARGS_OTHER]>(
+        fnOrOptions: F | EvaluateOptions,
+        fnOrArg0?: ARG_0 | F,
+        ...args: ARGS_OTHER | ARGS
+    ): Promise<R> {
         if (typeof fnOrOptions === 'function') {
-            fn = fnOrOptions as (...args: A) => T;
-            actualArgs = fnOrArg0 === undefined ? args : [fnOrArg0, ...args] as A;
-        } else {
-            options = fnOrOptions;
-            fn = fnOrArg0 as (...args: A) => T;
-            actualArgs = args;
+            return this.#evaluate(undefined, fnOrOptions, ...[fnOrArg0, ...args] as ARGS);
+        } else if (typeof fnOrOptions !== 'function' && typeof fnOrArg0 === 'function') {
+            return this.#evaluate(fnOrOptions, fnOrArg0 as F, ...args as ARGS);
         }
-
-        return this.#evaluate(options, fn, ...actualArgs);
+        throw new Error('invalid parameter');
     }
 
     async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
@@ -122,19 +150,20 @@ export class ExecutionContext {
                     }
                     if (window.SuperJSON === undefined) {
                         console.error('window.SuperJSON === undefined');
-                        throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it.');
                         debugger;
+                        throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + window._executionContextId ?? ${this.id} + ')');
                     }
                 }`
             :
             `
-            ${SuperJSONScript}; window.SuperJSON = SuperJSON.default;
+            ${SuperJSONScript}; (${this.session.customizeSuperJSON.toString()})(SuperJSON.default); window.SuperJSON = SuperJSON.default;
             (async () => {
             `)
             +
             `
+                ;;(${applyGlobal.toString()})();;
                 const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-                const args = SuperJSON.parse(${JSON.stringify(SuperJSON.stringify(args))});
+                const args = SuperJSON.parse(${JSON.stringify(this.session.superJSON.stringify(args))});
                 const result = await fn(...args);
                 return SuperJSON.stringify(result);
             })();
@@ -151,36 +180,9 @@ export class ExecutionContext {
         });
 
         if (res.exceptionDetails) {
-            const error: { [key: string]: unknown } = {};
-            if (res.exceptionDetails.exception) {
-                if (res.exceptionDetails.exception.preview) {
-                    res.exceptionDetails.exception.preview.properties.forEach(prop => {
-                        switch (prop.type) {
-                            case 'number':
-                                error[prop.name] = Number(prop.value);
-                                break;
-                            case 'string':
-                                error[prop.name] = prop.value;
-                                break;
-                        }
-                    });
-                    if (res.exceptionDetails.exception.preview.description) {
-                        error['description'] = res.exceptionDetails.exception.preview.description;
-                    }
-                } else {
-                    if (res.exceptionDetails.exception.className) {
-                        error['className'] = res.exceptionDetails.exception.className;
-                    }
-                    if (res.exceptionDetails.exception.description) {
-                        error['description'] = res.exceptionDetails.exception.description;
-                    }
-                }
-            } else {
-                error['text'] = res.exceptionDetails.text;
-            }
-            throw error;
+            throw convertExceptionDetailsToError(res.exceptionDetails);
         }
 
-        return res.result?.value === undefined ? undefined : SuperJSON.parse<any>(res.result.value);
+        return res.result?.value === undefined ? undefined : this.session.superJSON.parse<any>(res.result.value);
     }
 }

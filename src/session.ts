@@ -5,7 +5,21 @@ import { Debugger, WebContents } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext } from '.';
 
 import { readFileSync } from 'fs';
+import { registerTypes } from './superJSON';
+
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
+
+function convertToFunction(code: string) {
+    const trimmedCode = code.trim();
+    const isArrowFunction = /^\s*\(.*\)\s*=>\s*{/.test(trimmedCode);
+    if (isArrowFunction) {
+        return code;
+    }
+    if (/^\s*function\s*\w*\s*\(.*\)\s*{/.test(trimmedCode)) {
+        return code;
+    }
+    return `function ${trimmedCode}`;
+}
 
 declare global {
     interface Window {
@@ -64,10 +78,15 @@ export interface ExposeFunctionOptions {
     withReturnValue?: boolean | { timeout: number, delay: number };
 }
 
+export type CustomizeSuperJSONFunction = (superJSON: SuperJSON) => void;
+
 /**
  * Represents a session for interacting with the browser's DevTools protocol.
  */
 export class Session extends EventEmitter<Events> {
+
+    #superJSON: SuperJSON;
+    #customizeSuperJSON: CustomizeSuperJSONFunction = () => { };
 
     readonly webContents: WebContents;
     readonly #debugger: Debugger;
@@ -114,21 +133,18 @@ export class Session extends EventEmitter<Events> {
      * @param options - Optional settings for exposing the function.
      * @returns A promise that resolves when the function is successfully exposed.
      */
-    async evaluate<T, A extends unknown[]>(fnOrOptions: ((...args: A) => T) | EvaluateOptions, fnOrArg0?: unknown | ((...args: A) => T), ...args: A): Promise<T> {
-        let options: EvaluateOptions | undefined;
-        let fn: (...args: A) => T;
-        let actualArgs: A;
+    async evaluate<R, F extends (...args: ARGS) => R, ARG_0, ARGS_OTHER extends unknown[], ARGS extends [ARG_0, ...ARGS_OTHER]>(
+        fnOrOptions: F | EvaluateOptions,
+        fnOrArg0?: ARG_0 | F,
+        ...args: ARGS_OTHER | ARGS
+    ): Promise<R> {
         const ctx = new ExecutionContext(this);
         if (typeof fnOrOptions === 'function') {
-            fn = fnOrOptions as (...args: A) => T;
-            actualArgs = fnOrArg0 === undefined ? args : [fnOrArg0, ...args] as A;
-            return ctx.evaluate(fn, ...actualArgs);
-        } else {
-            options = fnOrOptions;
-            fn = fnOrArg0 as (...args: A) => T;
-            actualArgs = args;
-            return ctx.evaluate(options, fn, ...actualArgs);
+            return ctx.evaluate(fnOrOptions, ...[fnOrArg0, ...args] as ARGS);
+        } else if (typeof fnOrOptions !== 'function' && typeof fnOrArg0 === 'function') {
+            return ctx.evaluate(fnOrOptions, fnOrArg0 as F, ...args as ARGS);
         }
+        throw new Error('invalid parameter');
     }
 
     /**
@@ -138,6 +154,7 @@ export class Session extends EventEmitter<Events> {
      */
     constructor(webContents: WebContents) {
         super();
+        this.#superJSON = new SuperJSON();
         this.webContents = webContents;
         this.#debugger = webContents.debugger;
         this.#debugger.on('message', (_, method, params) => {
@@ -195,6 +212,7 @@ export class Session extends EventEmitter<Events> {
             this.#debugger.attach(protocolVersion);
         }
     }
+
     /**
      * Ensures that the SuperJSON library is loaded and available
      * for use within the web contents context.
@@ -206,18 +224,116 @@ export class Session extends EventEmitter<Events> {
      * Once SuperJSON is loaded, it sets up a listener to ensure that
      * SuperJSON is reloaded in any newly created execution contexts.
      *
+     * @param customizeSuperJSON An optional callback function to customize the SuperJSON instance before it is set up.
+     * This function receives the SuperJSON instance and can perform any required modifications.
+     *
      * @returns A promise that resolves when SuperJSON has been successfully loaded.
      *
      * @throws Any errors that occur during the execution of the script
      * will be logged to the console.
      */
-    async enableSuperJSON() {
+    async enableSuperJSON(customizeSuperJSON?: CustomizeSuperJSONFunction) {
         if (this.webContents.hasSuperJSON) {
+            if (customizeSuperJSON) {
+                this.configureSuperJSON(customizeSuperJSON);
+            }
             return;
         }
 
+        if (customizeSuperJSON) {
+            this.customizeSuperJSON = customizeSuperJSON;
+        }
+
+        const buildParams = () => ({
+            expression: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); window.SuperJSON = SuperJSON.default;`,
+            throwOnSideEffect: false,
+            awaitPromise: true,
+            replMode: false,
+            returnByValue: false,
+            generatePreview: false,
+            silent: true,
+            includeCommandLineAPI: false
+        });
+
+        await this.send('Runtime.evaluate', buildParams()).catch(console.error);
+
+        this.on('Runtime.executionContextCreated', event =>
+            this.send('Runtime.evaluate', { ...buildParams(), contextId: event.context.id, }).catch(console.error));
+
+        this.webContents.hasSuperJSON = true;
+    }
+
+    /**
+     * Gets the current SuperJSON instance.
+     *
+     * This getter method returns the instance of SuperJSON that is
+     * currently being used. The SuperJSON instance is customized
+     * using the provided callback function via the `customizeSuperJSON` setter.
+     *
+     * @returns The current SuperJSON instance.
+     */
+    get superJSON() {
+        return this.#superJSON;
+    }
+
+    /**
+     * Gets the current custom SuperJSON script.
+     *
+     * @returns The custom SuperJSON script as a string.
+     */
+    get customizeSuperJSON() {
+        return this.#customizeSuperJSON;
+    }
+
+    /**
+     * Sets the custom SuperJSON script.
+     *
+     * This setter method allows you to provide a callback function
+     * that customizes the SuperJSON instance. The provided function
+     * will be converted to a string and stored for later use when
+     * configuring SuperJSON in various contexts.
+     *
+     * @param customizeSuperJSON - A callback function to customize the SuperJSON instance.
+     * The function receives the SuperJSON instance and can perform any required modifications.
+     */
+    set customizeSuperJSON(customizeSuperJSON: CustomizeSuperJSONFunction) {
+        if (this.#customizeSuperJSON === customizeSuperJSON) {
+            return;
+        }
+        this.#customizeSuperJSON = customizeSuperJSON;
+        this.#superJSON = new SuperJSON();
+        registerTypes(this.#superJSON);
+        this.#customizeSuperJSON(this.#superJSON);
+    }
+
+    /**
+     * Configures the SuperJSON instance with a custom script.
+     *
+     * This method accepts a callback function that customizes the SuperJSON
+     * instance before it is set up in the browser context. The custom script
+     * is then evaluated in all execution contexts to ensure SuperJSON is
+     * properly configured.
+     *
+     * If SuperJSON is not already enabled, it will be enabled using the provided callback.
+     * This ensures that SuperJSON is properly loaded and configured in the current and future contexts.
+     *
+     * This function is meant to be used only in the mode where SuperJSON is preloaded.
+     *
+     * @param customizeSuperJSON - A callback function to customize the SuperJSON instance.
+     * The function receives the SuperJSON instance and can perform any required modifications.
+     *
+     * @returns A promise that resolves when the SuperJSON configuration has been successfully evaluated.
+     * @throws Any errors that occur during the execution of the script will be logged to the console.
+     */
+    async configureSuperJSON(customizeSuperJSON: CustomizeSuperJSONFunction) {
+        if (!this.webContents.hasSuperJSON) {
+            return this.enableSuperJSON(customizeSuperJSON);
+        }
+
+        this.customizeSuperJSON = customizeSuperJSON;
+
         await this.send('Runtime.evaluate', {
-            expression: `${SuperJSONScript}; window.SuperJSON = SuperJSON.default;`,
+            expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window.SuperJSON);`,
             throwOnSideEffect: false,
             awaitPromise: true,
             replMode: false,
@@ -227,10 +343,10 @@ export class Session extends EventEmitter<Events> {
             includeCommandLineAPI: false,
         });
 
-        this.on('Runtime.executionContextCreated', event => {
-            this.send('Runtime.evaluate', {
-                expression: `${SuperJSONScript}; window.SuperJSON = SuperJSON.default;`,
-                contextId: event.context.id,
+        for (const [contextId] of this.#executionContexts) {
+            await this.send('Runtime.evaluate', {
+                contextId,
+                expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window.SuperJSON);`,
                 throwOnSideEffect: false,
                 awaitPromise: true,
                 replMode: false,
@@ -238,11 +354,10 @@ export class Session extends EventEmitter<Events> {
                 generatePreview: false,
                 silent: true,
                 includeCommandLineAPI: false,
-            }).catch(console.error);
-        });
-
-        this.webContents.hasSuperJSON = true;
+            });
+        }
     }
+
 
     /**
      * Detaches the debugger from the browser window.
@@ -265,41 +380,41 @@ export class Session extends EventEmitter<Events> {
             window._executionContextId = executionContextId;
 
             // @ts-expect-error : window[name]
-            window[name] = (...args: unknown[]) =>
-                new Promise((resolve, reject) => {
+            window[name] = (...args: unknown[]) => {
+                if (window._callSeq === undefined) {
+                    window._callSeq = BigInt(0);
+                }
+                const callSequence = `${window._callSeq++}-${Math.random()}`;
+                window._callback(window.SuperJSON.stringify({ executionContextId, callSequence, name, args }));
+                if (options === undefined) {
+                    return;
+                }
+                if (options.withReturnValue === undefined) {
+                    return;
+                }
+                const { promise, resolve, reject } = Promise.withResolvers();
+                const h = setInterval(() => {
                     try {
-                        if (window._callSeq === undefined) {
-                            window._callSeq = BigInt(0);
+                        if (window._returnValues && callSequence in window._returnValues) {
+                            resolve(window._returnValues[callSequence]);
+                            delete window._returnValues[callSequence];
+                            clearInterval(h);
                         }
-                        const callSequence = `${window._callSeq++}-${Math.random()}`;
-                        window._callback(window.SuperJSON.stringify({ executionContextId, callSequence, name, args }));
-                        if (options?.withReturnValue) {
-                            const h = setInterval(() => {
-                                try {
-                                    if (window._returnValues && callSequence in window._returnValues) {
-                                        resolve(window._returnValues[callSequence]);
-                                        delete window._returnValues[callSequence];
-                                        clearInterval(h);
-                                    }
-                                    if (window._returnErrors && callSequence in window._returnErrors) {
-                                        reject(window._returnErrors[callSequence]);
-                                        delete window._returnErrors[callSequence];
-                                        clearInterval(h);
-                                    }
-                                } catch (error) {
-                                    reject(error);
-                                }
-                            }, typeof options.withReturnValue === 'object' ? options.withReturnValue.delay : 1);
-                            if (typeof options.withReturnValue === 'object') {
-                                setTimeout(() => clearInterval(h), options.withReturnValue.timeout);
-                            }
-                        } else {
-                            resolve(undefined);
+                        if (window._returnErrors && callSequence in window._returnErrors) {
+                            reject(window._returnErrors[callSequence] as Error);
+                            delete window._returnErrors[callSequence];
+                            clearInterval(h);
                         }
                     } catch (error) {
-                        reject(error);
+                        reject(error as Error);
                     }
-                });
+                }, typeof options.withReturnValue === 'object' ? options.withReturnValue.delay : 1);
+                if (typeof options.withReturnValue === 'object') {
+                    setTimeout(clearInterval.bind(h), options.withReturnValue.timeout);
+                }
+                return promise;
+            };
+
         }
 
         const executionContextCreated = async (context: ExecutionContext) => {
@@ -312,59 +427,65 @@ export class Session extends EventEmitter<Events> {
             }
         };
 
+        type Payload = { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A };
+
+        const processBindingCall = async (executionContextId: number, payload: Payload) => {
+            if (payload.executionContextId === undefined) {
+                payload.executionContextId = executionContextId;
+            }
+            if (payload.executionContextId === undefined) {
+                console.error(`invalid context id : (payload: ${JSON.stringify(payload)})`);
+                return;
+            }
+            if (!this.#executionContexts.has(payload.executionContextId)) {
+                console.warn(`context not found: (id: ${payload.executionContextId}, payload: ${JSON.stringify(payload)})`);
+                this.#executionContexts.set(payload.executionContextId, new ExecutionContext(this, payload.executionContextId));
+            }
+            const context = this.#executionContexts.get(payload.executionContextId);
+            if (context === undefined) {
+                console.error(`invalid context : (payload, ${JSON.stringify(payload)})`);
+                return;
+            }
+            try {
+                const ret = await fn(...payload.args);
+                if (options?.withReturnValue) {
+                    await context.evaluate((id, seq, ret) => {
+                        if (window._executionContextId === undefined) {
+                            window._executionContextId = id;
+                        } else {
+                            console.assert(window._executionContextId === id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
+                        }
+                        if (window._returnValues === undefined) {
+                            window._returnValues = {};
+                        }
+                        window._returnValues[seq] = ret;
+                    }, executionContextId, payload.callSequence, ret);
+                }
+            } catch (error) {
+                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                    if (options?.withReturnValue) {
+                        await context.evaluate((id, seq, error) => {
+                            if (window._executionContextId === undefined) {
+                                window._executionContextId = id;
+                            } else {
+                                console.assert(window._executionContextId === id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
+                            }
+                            if (window._returnErrors === undefined) {
+                                window._returnErrors = {};
+                            }
+                            window._returnErrors[seq] = error;
+                        }, executionContextId, payload.callSequence, error);
+                    }
+                }
+            }
+        }
+
         const bindingCalled = async (event: Protocol.Runtime.BindingCalledEvent) => {
             try {
                 if (event.name === '_callback') {
-                    const payload: { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A } = SuperJSON.parse(event.payload);
+                    const payload: Payload = this.superJSON.parse(event.payload);
                     if (payload.name === name) {
-                        if (payload.executionContextId === undefined) {
-                            payload.executionContextId = event.executionContextId;
-                        }
-                        if (payload.executionContextId === undefined) {
-                            console.error(`invalid context id : (payload: ${event.payload})`);
-                            return;
-                        }
-                        if (!this.#executionContexts.has(payload.executionContextId)) {
-                            console.warn(`context not found: (id: ${payload.executionContextId}, payload: ${event.payload})`);
-                            this.#executionContexts.set(payload.executionContextId, new ExecutionContext(this, payload.executionContextId));
-                        }
-                        const context = this.#executionContexts.get(payload.executionContextId);
-                        if (context === undefined) {
-                            console.error(`invalid context : (payload, ${event.payload})`);
-                            return;
-                        }
-                        try {
-                            const ret = await fn(...payload.args);
-                            if (options?.withReturnValue) {
-                                await context.evaluate((id, seq, ret) => {
-                                    if (window._executionContextId === undefined) {
-                                        window._executionContextId = id;
-                                    } else {
-                                        console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
-                                    }
-                                    if (window._returnValues === undefined) {
-                                        window._returnValues = {};
-                                    }
-                                    window._returnValues[seq] = ret;
-                                }, event.executionContextId, payload.callSequence, ret);
-                            }
-                        } catch (error) {
-                            if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                                if (options?.withReturnValue) {
-                                    await context.evaluate((id, seq, error) => {
-                                        if (window._executionContextId === undefined) {
-                                            window._executionContextId = id;
-                                        } else {
-                                            console.assert(window._executionContextId == id, `window._executionContextId:${window._executionContextId} !== id:${id}`);
-                                        }
-                                        if (window._returnErrors === undefined) {
-                                            window._returnErrors = {};
-                                        }
-                                        window._returnErrors[seq] = error;
-                                    }, event.executionContextId, payload.callSequence, error);
-                                }
-                            }
-                        }
+                        processBindingCall(event.executionContextId, payload);
                     }
                 }
             } catch (error) {
