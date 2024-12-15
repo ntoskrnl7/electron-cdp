@@ -38,9 +38,9 @@ function convertExceptionDetailsToError(exceptionDetails: Protocol.Runtime.Excep
 
 export class Expression<R> {
 
-    readonly builder: ExpressionBuilder;
+    readonly builder: ExpressionBuilder<R>;
 
-    constructor(builder: ExpressionBuilder) {
+    constructor(builder: ExpressionBuilder<R>) {
         this.builder = builder;
     }
 
@@ -49,7 +49,7 @@ export class Expression<R> {
         const contextId = context.id;
         const options = this.builder.options;
 
-        let expression = (session.webContents.hasSuperJSON ? `
+        let expression = session.webContents.hasSuperJSON ? `
             (async () => {
                 if (window.SuperJSON === undefined) {
                     try {
@@ -86,20 +86,13 @@ export class Expression<R> {
                         debugger;
                         throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (executionContextId : ' + window._executionContextId ?? ${contextId} + ')');
                     }
-                }`
+                }
+            })()`
             :
             `
             ;;(${applyGlobal.toString()})();;
             ${SuperJSONScript}; (${session.customizeSuperJSON.toString()})(SuperJSON.default); window.SuperJSON = SuperJSON.default;
-            (async () => {
-            `)
-            +
-            `
-                const fn = new Function(...
-                const args = SuperJSON.pars....
-                const result = await fn(...args);
-                return SuperJSON.stringify(result);
-            })();
+            (async () => {})();
             `;
 
         for (const { fn, args } of this.builder.result) {
@@ -138,24 +131,46 @@ export class Expression<R> {
     }
 }
 
-export class ExpressionBuilder {
+export class ExpressionBuilder<PR> {
 
     #options?: EvaluateOptions;
     get options() {
         return this.#options;
     }
 
-    readonly result: Array<{ fn: Function; args: unknown[]; }> = [];
+    readonly result: Array<{ fn: Function; args: unknown[]; resultChain?: boolean; }> = [];
 
-    static append<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): ExpressionBuilder {
-        const ret = new ExpressionBuilder();
-        ret.result.push({ fn, args: args });
+    static append<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): ExpressionBuilder<T> {
+        const ret = new ExpressionBuilder<T>();
+        ret.result.push({ fn, args });
         return ret;
     }
 
     append<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): this {
-        this.result.push({ fn, args: args });
+        this.result.push({ fn, args });
         return this;
+    }
+
+    appendChained<T, A extends unknown[]>(fn: (previousResult: PR, ...args: A) => T, ...args: A): ExpressionBuilder<T> {
+        this.result.push({ fn, args, resultChain: true });
+        return this as unknown as ExpressionBuilder<T>;
+    }
+
+
+    buildChained<T, A extends unknown[]>(fn: (previousResult: PR, ...args: A) => T, ...args: A): Expression<T>;
+    buildChained<T, A extends unknown[]>(options: EvaluateOptions, fn: (previousResult: PR, ...args: A) => T, ...args: A): Expression<T>;
+    buildChained<R, F extends (previousResult: PR, ...args: ARGS) => R, ARG_0, ARGS_OTHER extends unknown[], ARGS extends [ARG_0, ...ARGS_OTHER]>(
+        fnOrOptions: F | EvaluateOptions,
+        fnOrArg0?: ARG_0 | F,
+        ...args: ARGS_OTHER | ARGS
+    ): Expression<R> {
+        if (typeof fnOrOptions === 'function') {
+            this.result.push({ fn: fnOrOptions, args: [fnOrArg0, ...args] });
+        } else if (typeof fnOrOptions !== 'function' && typeof fnOrArg0 === 'function') {
+            this.#options = fnOrOptions;
+            this.result.push({ fn: fnOrArg0, args: args, resultChain: true });
+        }
+        return new Expression<R>(this as unknown as ExpressionBuilder<R>);
     }
 
     build<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Expression<T>;
@@ -171,7 +186,7 @@ export class ExpressionBuilder {
             this.#options = fnOrOptions;
             this.result.push({ fn: fnOrArg0, args: args });
         }
-        return new Expression(this);
+        return new Expression<R>(this as unknown as ExpressionBuilder<R>);
     }
 }
 
@@ -346,13 +361,16 @@ export class ExecutionContext {
 
 function phase1() {
     console.log(1);
+    return 1;
 }
 function phase2() {
     console.log(2);
+    return true;
 }
 
 const a = ExpressionBuilder.append(() => { console.log(1); return 1 }).append((a) => { console.log(a); return a; }, 2).build((a, b) => { return true; }, 1, 2)
-const b = ExpressionBuilder.append(phase1).append(phase2).build((a) => a, 100);
+const b = ExpressionBuilder.append(phase1).append(phase2).append(() => { }).build((a) => a, 100);
+const c = ExpressionBuilder.append(phase1).appendChained(phase2).appendChained((result) => { }).appendChained(() => { return new Error('1') }).buildChained((err, a) => a, 100);
 
 import { webContents } from 'electron';
 const ctx = new ExecutionContext((new Session(webContents.fromId(0)!)));

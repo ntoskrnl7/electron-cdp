@@ -2,10 +2,11 @@ import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import { Debugger, WebContents } from 'electron';
-import { EvaluateOptions, SuperJSON, ExecutionContext } from '.';
+import { EvaluateOptions, SuperJSON, ExecutionContext, ExpressionBuilder } from '.';
 
 import { readFileSync } from 'fs';
 import { registerTypes } from './superJSON';
+import { applyGlobal } from './global';
 
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
 
@@ -419,7 +420,7 @@ export class Session extends EventEmitter<Events> {
 
         const executionContextCreated = async (context: ExecutionContext) => {
             try {
-                await context.evaluate(attachFunction, name, options, context.id);
+                await context.evaluate(ExpressionBuilder.append(applyGlobal).build(attachFunction, name, options, context.id));
             } catch (error) {
                 if ((error as Error).message !== 'Cannot find context with specified id') {
                     console.warn(error);
