@@ -49,8 +49,9 @@ export class Expression<R> {
         const contextId = context.id;
         const options = this.builder.options;
 
-        let expression = session.webContents.hasSuperJSON ? `
-            (async () => {
+        let expression = session.webContents.hasSuperJSON
+            ?
+            `;;(async () => {
                 if (window.SuperJSON === undefined) {
                     try {
                         window.SuperJSON = window.top.SuperJSON;
@@ -89,20 +90,26 @@ export class Expression<R> {
                 }
             })()`
             :
-            `
-            ;;(${applyGlobal.toString()})();;
+            `;;(${applyGlobal.toString()})();;
             ${SuperJSONScript}; (${session.customizeSuperJSON.toString()})(SuperJSON.default); window.SuperJSON = SuperJSON.default;
-            (async () => {})();
-            `;
+            Promise.resolve()`;
 
-        for (const { fn, args } of this.builder.result) {
-            expression += `
-            ;;(async () => {
-                const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-                const args = SuperJSON.parse(${JSON.stringify(session.superJSON.stringify(args))});
-                const result = await fn(...args);
-                return SuperJSON.stringify(result);
-            })()`
+        for (const { fn, args, resultChain } of this.builder.result) {
+            if (resultChain) {
+                expression += `.then(async (prev) => {
+                    const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
+                    const args = SuperJSON.parse(${JSON.stringify(session.superJSON.stringify(args))});
+                    const result = await fn(SuperJSON.parse(prev), ...args);
+                    return SuperJSON.stringify(result);
+                })`;
+            } else {
+                expression += `.then(async () => {
+                    const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
+                    const args = SuperJSON.parse(${JSON.stringify(session.superJSON.stringify(args))});
+                    const result = await fn(...args);
+                    return SuperJSON.stringify(result);
+                })`;
+            }
         }
 
         const res = await session.send('Runtime.evaluate', {
@@ -122,13 +129,6 @@ export class Expression<R> {
 
         return res.result?.value === undefined ? undefined : session.superJSON.parse<any>(res.result.value);
     }
-
-    static all<T extends readonly unknown[] | []>(values: T): Promise<{ -readonly [P in keyof T]: Awaited<T[P]>; }> {
-        throw new Error();
-    }
-    static race<T extends readonly unknown[] | []>(values: T): Promise<Awaited<T[number]>> {
-        throw new Error();
-    }
 }
 
 export class ExpressionBuilder<PR> {
@@ -138,16 +138,16 @@ export class ExpressionBuilder<PR> {
         return this.#options;
     }
 
-    readonly result: Array<{ fn: Function; args: unknown[]; resultChain?: boolean; }> = [];
+    readonly result: Array<{ fn: Function; args: unknown[]; resultChain: boolean; }> = [];
 
     static append<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): ExpressionBuilder<T> {
         const ret = new ExpressionBuilder<T>();
-        ret.result.push({ fn, args });
+        ret.result.push({ fn, args, resultChain: false });
         return ret;
     }
 
     append<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): this {
-        this.result.push({ fn, args });
+        this.result.push({ fn, args, resultChain: false });
         return this;
     }
 
@@ -165,10 +165,10 @@ export class ExpressionBuilder<PR> {
         ...args: ARGS_OTHER | ARGS
     ): Expression<R> {
         if (typeof fnOrOptions === 'function') {
-            this.result.push({ fn: fnOrOptions, args: [fnOrArg0, ...args] });
+            this.result.push({ fn: fnOrOptions, args: [fnOrArg0, ...args], resultChain: true });
         } else if (typeof fnOrOptions !== 'function' && typeof fnOrArg0 === 'function') {
             this.#options = fnOrOptions;
-            this.result.push({ fn: fnOrArg0, args: args, resultChain: true });
+            this.result.push({ fn: fnOrArg0, args, resultChain: true });
         }
         return new Expression<R>(this as unknown as ExpressionBuilder<R>);
     }
@@ -181,87 +181,13 @@ export class ExpressionBuilder<PR> {
         ...args: ARGS_OTHER | ARGS
     ): Expression<R> {
         if (typeof fnOrOptions === 'function') {
-            this.result.push({ fn: fnOrOptions, args: [fnOrArg0, ...args] });
+            this.result.push({ fn: fnOrOptions, args: [fnOrArg0, ...args], resultChain: false });
         } else if (typeof fnOrOptions !== 'function' && typeof fnOrArg0 === 'function') {
             this.#options = fnOrOptions;
-            this.result.push({ fn: fnOrArg0, args: args });
+            this.result.push({ fn: fnOrArg0, args, resultChain: false });
         }
         return new Expression<R>(this as unknown as ExpressionBuilder<R>);
     }
-}
-
-
-async function evaluate<T, A extends unknown[]>(context: ExecutionContext, options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
-    const session = context.session;
-    const contextId = context.id;
-    const expression = (session.webContents.hasSuperJSON ? `
-        (async () => {
-            if (window.SuperJSON === undefined) {
-                try {
-                    window.SuperJSON = window.top.SuperJSON;
-                } catch (error) {
-                }
-                if (window.SuperJSON === undefined) {
-                    for (const w of Array.from(window)) {
-                        try {
-                            if (w.SuperJSON) {
-                                window.SuperJSON = w.SuperJSON;
-                                break;
-                            }
-                        } catch (error) {
-                        }
-                    }
-                }
-                if (window.SuperJSON === undefined) {
-                    await new Promise(resolve => {
-                        const h = setInterval(() => {
-                            if (window.SuperJSON !== undefined) {
-                            clearInterval(h);
-                            resolve();
-                            }
-                        });
-                        setTimeout(() => {
-                            clearInterval(h);
-                            resolve();
-                        }, ${options?.timeout ?? 5000});
-                    });
-                }
-                if (window.SuperJSON === undefined) {
-                    console.error('window.SuperJSON === undefined');
-                    debugger;
-                    throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + window._executionContextId ?? ${contextId} + ')');
-                }
-            }`
-        :
-        `
-        ;;(${applyGlobal.toString()})();;
-        ${SuperJSONScript}; (${session.customizeSuperJSON.toString()})(SuperJSON.default); window.SuperJSON = SuperJSON.default;
-        (async () => {
-        `)
-        +
-        `
-            const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-            const args = SuperJSON.parse(${JSON.stringify(session.superJSON.stringify(args))});
-            const result = await fn(...args);
-            return SuperJSON.stringify(result);
-        })();
-        `;
-    const res = await session.send('Runtime.evaluate', {
-        expression,
-        contextId,
-        throwOnSideEffect: false,
-        awaitPromise: true,
-        replMode: false,
-        returnByValue: false,
-        generatePreview: false,
-        ...options
-    });
-
-    if (res.exceptionDetails) {
-        throw convertExceptionDetailsToError(res.exceptionDetails);
-    }
-
-    return res.result?.value === undefined ? undefined : session.superJSON.parse<any>(res.result.value);
 }
 
 /**
@@ -308,14 +234,6 @@ export class ExecutionContext {
         }
     }
 
-
-    evaluateAll<T extends readonly unknown[] | []>(values: T): Promise<{ -readonly [P in keyof T]: Awaited<T[P]>; }> {
-        throw new Error();
-    }
-    evaluateRace<T extends readonly unknown[] | []>(values: T): Promise<Awaited<T[number]>> {
-        throw new Error();
-    }
-
     async evaluate<R>(expression: Expression<R>): Promise<R>;
 
     /**
@@ -355,30 +273,4 @@ export class ExecutionContext {
         throw new Error('invalid parameter');
     }
 }
-
-
-
-
-function phase1() {
-    console.log(1);
-    return 1;
-}
-function phase2() {
-    console.log(2);
-    return true;
-}
-
-const a = ExpressionBuilder.append(() => { console.log(1); return 1 }).append((a) => { console.log(a); return a; }, 2).build((a, b) => { return true; }, 1, 2)
-const b = ExpressionBuilder.append(phase1).append(phase2).append(() => { }).build((a) => a, 100);
-const c = ExpressionBuilder.append(phase1).appendChained(phase2).appendChained((result) => { }).appendChained(() => { return new Error('1') }).buildChained((err, a) => a, 100);
-
-import { webContents } from 'electron';
-const ctx = new ExecutionContext((new Session(webContents.fromId(0)!)));
-ctx.evaluate(a);
-ctx.evaluateAll([a, b]);
-ctx.evaluateRace([a, b]);
-
-
-
-
 

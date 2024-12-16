@@ -2,7 +2,7 @@ import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import { Debugger, WebContents } from 'electron';
-import { EvaluateOptions, SuperJSON, ExecutionContext, ExpressionBuilder } from '.';
+import { EvaluateOptions, SuperJSON, ExecutionContext, ExpressionBuilder, Expression } from '.';
 
 import { readFileSync } from 'fs';
 import { registerTypes } from './superJSON';
@@ -107,6 +107,8 @@ export class Session extends EventEmitter<Events> {
         return this.#executionContexts;
     }
 
+    async evaluate<R>(expression: Expression<R>): Promise<R>;
+
     /**
      * Evaluates the provided function with the given arguments in the context of the current page.
      *
@@ -135,11 +137,14 @@ export class Session extends EventEmitter<Events> {
      * @returns A promise that resolves when the function is successfully exposed.
      */
     async evaluate<R, F extends (...args: ARGS) => R, ARG_0, ARGS_OTHER extends unknown[], ARGS extends [ARG_0, ...ARGS_OTHER]>(
-        fnOrOptions: F | EvaluateOptions,
+        fnOrOptions: F | EvaluateOptions | Expression<R>,
         fnOrArg0?: ARG_0 | F,
         ...args: ARGS_OTHER | ARGS
     ): Promise<R> {
         const ctx = new ExecutionContext(this);
+        if (fnOrOptions instanceof Expression) {
+            return ctx.evaluate(fnOrOptions);
+        }
         if (typeof fnOrOptions === 'function') {
             return ctx.evaluate(fnOrOptions, ...[fnOrArg0, ...args] as ARGS);
         } else if (typeof fnOrOptions !== 'function' && typeof fnOrArg0 === 'function') {
