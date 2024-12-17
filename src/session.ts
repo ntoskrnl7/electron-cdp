@@ -155,6 +155,8 @@ export class Session extends EventEmitter<Events> {
     constructor(webContents: WebContents) {
         super();
         this.#superJSON = new SuperJSON();
+        registerTypes(this.#superJSON);
+
         this.webContents = webContents;
         this.#debugger = webContents.debugger;
         this.#debugger.on('message', (_, method, params) => {
