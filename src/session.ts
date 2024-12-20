@@ -424,7 +424,7 @@ export class Session extends EventEmitter<Events> {
                 await context.evaluate(attachFunction, name, options, context.id);
             } catch (error) {
                 if ((error as Error).message !== 'Cannot find context with specified id') {
-                    console.warn(error);
+                    console.debug(error);
                 }
             }
         };
@@ -440,7 +440,7 @@ export class Session extends EventEmitter<Events> {
                 return;
             }
             if (!this.#executionContexts.has(payload.executionContextId)) {
-                console.warn(`context not found: (id: ${payload.executionContextId}, payload: ${JSON.stringify(payload)})`);
+                console.debug(`context not found: (id: ${payload.executionContextId}, payload: ${JSON.stringify(payload)})`);
                 this.#executionContexts.set(payload.executionContextId, new ExecutionContext(this, payload.executionContextId));
             }
             const context = this.#executionContexts.get(payload.executionContextId);
@@ -492,7 +492,7 @@ export class Session extends EventEmitter<Events> {
                 }
             } catch (error) {
                 if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                    console.warn(error);
+                    console.debug(error);
                 }
             }
         };
