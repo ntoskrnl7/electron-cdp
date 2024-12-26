@@ -237,7 +237,7 @@ export class Session extends EventEmitter<Events> {
     async enableSuperJSON(customizeSuperJSON?: CustomizeSuperJSONFunction) {
         if (this.webContents.hasSuperJSON) {
             if (customizeSuperJSON) {
-                this.configureSuperJSON(customizeSuperJSON);
+                await this.configureSuperJSON(customizeSuperJSON);
             }
             return;
         }
@@ -329,7 +329,7 @@ export class Session extends EventEmitter<Events> {
      */
     async configureSuperJSON(customizeSuperJSON: CustomizeSuperJSONFunction) {
         if (!this.webContents.hasSuperJSON) {
-            return this.enableSuperJSON(customizeSuperJSON);
+            return await this.enableSuperJSON(customizeSuperJSON);
         }
 
         this.customizeSuperJSON = customizeSuperJSON;
