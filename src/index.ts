@@ -9,3 +9,4 @@ export type EvaluateOptions = Omit<Protocol.Runtime.EvaluateRequest, 'contextId'
 export * from './electron';
 export * from './session';
 export * from './executionContext';
+export * from './utils';
