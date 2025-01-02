@@ -5,7 +5,7 @@ import { Protocol, SuperJSON } from ".";
 
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
 
-export function generateScriptString<T, A extends unknown[]>(options: ({ session?: Session, timeout?: number; executionContextId?: Protocol.Runtime.ExecutionContextId }) | undefined, fn: (...args: A) => T, ...args: A) {
+export function generateScriptString<T, A extends unknown[]>(options: ({ session?: Session, timeout?: number; }) | undefined, fn: (...args: A) => T, ...args: A) {
     return (options?.session?.webContents.hasSuperJSON ? `
         (async () => {
             if (window.SuperJSON === undefined) {
@@ -41,7 +41,7 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
                 if (window.SuperJSON === undefined) {
                     console.error('window.SuperJSON === undefined');
                     debugger;
-                    throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + window._executionContextId ?? ${options?.executionContextId} + ')');
+                    throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + window._executionContextId + ')');
                 }
             }`
         :
