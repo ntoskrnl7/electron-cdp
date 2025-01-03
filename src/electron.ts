@@ -1,6 +1,6 @@
 
 import { WebContents } from 'electron';
-import { Session as CDPSession, SuperJSON } from '.';
+import { Session as CDPSession, generateScriptString, SuperJSON } from '.';
 
 declare global {
     namespace Electron {
@@ -20,6 +20,9 @@ declare global {
              * accessed globally within the web contents, `false` otherwise.
              */
             hasSuperJSON: boolean;
+        }
+        interface WebFrameMain {
+            evaluate<A extends unknown[], R>(fn: (...args: A) => R, ...args: A): Promise<R>;
         }
     }
 }
@@ -55,6 +58,16 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
 
     Object.defineProperty(target, 'cdp', { get: () => session });
 
+    target.mainFrame.evaluate = <A extends unknown[], R>(fn: (...args: A) => R, ...args: A): Promise<R> =>
+        (target.mainFrame.executeJavaScript(generateScriptString({ session }, fn, ...args))).then(result => session.superJSON.parse(result as string));
+    target
+        .on('frame-created', async (_, details) => {
+            if (details.frame) {
+                const frame = details.frame;
+                frame.evaluate = <A extends unknown[], R>(fn: (...args: A) => R, ...args: A): Promise<R> =>
+                    frame.executeJavaScript(generateScriptString({ session }, fn, ...args)).then(result => session.superJSON.parse(result as string));
+            }
+        });
     return session;
 }
 

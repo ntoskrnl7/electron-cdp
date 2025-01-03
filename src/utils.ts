@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { applyGlobal } from "./global";
 import { Session } from "./session";
-import { Protocol, SuperJSON } from ".";
+import { SuperJSON } from ".";
 
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
 
