@@ -483,9 +483,21 @@ export class Session extends EventEmitter<Events> {
             })).identifier,
             bindingCalled
         });
-        await this.evaluate(attachFunction, name, options);
+        try {
+            await this.evaluate(attachFunction, name, options);
+        } catch (error) {
+            if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                console.debug(error);
+            }
+        }
         for (const ctx of this.executionContexts.values()) {
-            await ctx.evaluate(attachFunction, name, options);
+            try {
+                await ctx.evaluate(attachFunction, name, options);
+            } catch (error) {
+                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                    console.debug(error);
+                }
+            }
         }
     }
 
