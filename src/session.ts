@@ -69,6 +69,44 @@ export declare type Events = {
 };
 
 /**
+ * Options for awaiting the function call result.
+ */
+export interface WithReturnValueOptions {
+    /**
+     * The maximum duration to wait for the function call result.
+     * If the result is not received within this time frame, the operation will be considered failed.
+     * Default: Infinity
+     */
+    timeout?: number;
+
+    /**
+     * The delay before starting to wait for the function result.
+     * This value represents the initial wait time before the function result is checked.
+     * Default: 1
+     */
+    delay?: number;
+}
+
+/**
+ * Options for retrying a function call if it fails.
+ */
+export interface RetryOptions {
+    /**
+     * The maximum number of retry attempts.
+     * This value determines how many times the function call will be retried in case of failure.
+     * Default: Infinity
+     */
+    count?: number;
+
+    /**
+     * The delay between each retry attempt.
+     * This represents the amount of time to wait before making another retry after a failure.
+     * Default: 1
+     */
+    delay?: number;
+}
+
+/**
  * Options for exposing a function.
  */
 export interface ExposeFunctionOptions {
@@ -80,44 +118,16 @@ export interface ExposeFunctionOptions {
      * - `false`, `undefined` : The function call result will not be awaited.
      * - `true`, `{}` : The function call result will be awaited with the default settings for its sub-properties.
      */
-    withReturnValue?: boolean | {
-        /**
-         * The maximum duration to wait for the function call result.
-         * If the result is not received within this time frame, the operation will be considered failed.
-         * Default: Infinity
-         */
-        timeout?: number;
+    withReturnValue?: boolean | WithReturnValueOptions;
 
-        /**
-         * The delay before starting to wait for the function result.
-         * This value represents the initial wait time before the function result is checked.
-         * Default: 1
-         */
-        delay?: number;
-
-        /**
-         * Indicates whether the function call should be retried if it fails.
-         * If not specified, no retries will be performed.
-         *
-         * - `false`, `undefined` : No retry attempts will be made. The function call will fail immediately if it encounters an error.
-         * - `true`, `{}`: The function call will be retried using the default retry configuration. By default, this means retries will continue indefinitely (if count is not specified) with a short delay between each attempt.
-         */
-        retry?: boolean | {
-            /**
-             * The maximum number of retry attempts.
-             * This value determines how many times the function call will be retried in case of failure.
-             * Default: Infinity
-             */
-            count?: number;
-
-            /**
-             * The delay between each retry attempt.
-             * This represents the amount of time to wait before making another retry after a failure.
-             * Default: 1
-             */
-            delay?: number;
-        };
-    };
+    /**
+     * Indicates whether the function call should be retried if it fails.
+     * If not specified, no retries will be performed.
+     *
+     * - `false`, `undefined` : No retry attempts will be made. The function call will fail immediately if it encounters an error.
+     * - `true`, `{}`: The function call will be retried using the default retry configuration.
+     */
+    retry?: boolean | RetryOptions;
 }
 
 export type CustomizeSuperJSONFunction = (superJSON: SuperJSON) => void;
@@ -442,6 +452,23 @@ export class Session extends EventEmitter<Events> {
 
                 window['__cdp.callback'](window['__cdp.superJSON'].stringify({ callSequence, name, args }));
 
+                const { promise, resolve, reject } = Promise.withResolvers();
+
+                if (options?.retry) {
+                    const retry = options?.retry === true ? { delay: 1 } : options?.retry;
+                    const retryIntervalId = setInterval(() => {
+                        if (cdp.returnValues[callSequence].init) {
+                            return;
+                        }
+                        if ((retry.count !== undefined) && retry.count-- < 0) {
+                            console.warn('Failed after maximum retry attempts.');
+                            return;
+                        }
+                        window['__cdp.callback'](window['__cdp.superJSON'].stringify({ callSequence, name, args }));
+                    }, retry.delay ?? 1);
+                    promise.finally(() => clearInterval(retryIntervalId));
+                }
+
                 if (!options?.withReturnValue) {
                     delete cdp.returnValues[callSequence];
                     delete cdp.returnErrors[callSequence];
@@ -449,7 +476,7 @@ export class Session extends EventEmitter<Events> {
                 }
 
                 const withReturnValue = typeof options.withReturnValue === 'object' ? options.withReturnValue : {};
-                const { promise, resolve, reject } = Promise.withResolvers();
+
                 const resultIntervalId = setInterval(() => {
                     try {
                         if (cdp.returnValues && callSequence in cdp.returnValues && 'value' in cdp.returnValues[callSequence]) {
@@ -471,20 +498,6 @@ export class Session extends EventEmitter<Events> {
                         delete cdp.returnErrors[callSequence];
                     }
                 });
-                if (withReturnValue.retry) {
-                    const retry = withReturnValue.retry === true ? { delay: 1 } : withReturnValue.retry;
-                    const retryIntervalId = setInterval(() => {
-                        if ((retry.count !== undefined) && retry.count-- < 0) {
-                            reject(new Error('Failed after maximum retry attempts.'));
-                            return;
-                        }
-                        if (cdp.returnValues[callSequence].init) {
-                            return;
-                        }
-                        window['__cdp.callback'](window['__cdp.superJSON'].stringify({ callSequence, name, args }));
-                    }, retry.delay ?? 1);
-                    promise.finally(() => clearInterval(retryIntervalId));
-                }
                 if (withReturnValue.timeout !== undefined) {
                     const timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), withReturnValue.timeout);
                     promise.finally(() => clearTimeout(timeoutId));
@@ -517,7 +530,7 @@ export class Session extends EventEmitter<Events> {
             const withReturnValue = options?.withReturnValue;
             const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
             try {
-                if (typeof withReturnValue === 'object' && withReturnValue.retry) {
+                if (options?.retry) {
                     await context.evaluate({ timeout }, (id, seq) => {
                         if (window.__cdp?.returnValues && seq in window.__cdp.returnValues) {
                             window.__cdp.returnValues[seq].init = true;
