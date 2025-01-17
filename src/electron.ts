@@ -5,7 +5,6 @@ import { Session as CDPSession, generateScriptString, SuperJSON } from '.';
 declare global {
     namespace Electron {
         interface WebContents {
-
             /**
              * Retrieves the current CDP (Chrome DevTools Protocol) session associated with the web contents.
              *
@@ -21,7 +20,26 @@ declare global {
              */
             hasSuperJSON: boolean;
         }
+
         interface WebFrameMain {
+            /**
+             * A promise that resolves with the result of the executed code or is rejected if
+             * execution throws or results in a rejected promise.
+             *
+             * Evaluates `fn(...args)` in page.
+             *
+             * In the browser window some HTML APIs like `requestFullScreen` can only be
+             * invoked by a gesture from the user. Setting `userGesture` to `true` will remove
+             * this limitation.
+             */
+            evaluate<A extends unknown[], R>(userGesture: boolean, fn: (...args: A) => R, ...args: A): Promise<R>;
+
+            /**
+              * A promise that resolves with the result of the executed code or is rejected if
+              * execution throws or results in a rejected promise.
+              *
+              * Evaluates `fn(...args)` in page.
+              */
             evaluate<A extends unknown[], R>(fn: (...args: A) => R, ...args: A): Promise<R>;
         }
     }
@@ -58,14 +76,25 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
 
     Object.defineProperty(target, 'cdp', { get: () => session });
 
-    target.mainFrame.evaluate = <A extends unknown[], R>(fn: (...args: A) => R, ...args: A): Promise<R> =>
-        (target.mainFrame.executeJavaScript(generateScriptString({ session }, fn, ...args))).then(result => session.superJSON.parse(result as string));
+    target.mainFrame.evaluate = async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
+        if (typeof userGestureOrFn === 'boolean') {
+            return session.superJSON.parse(await (target.mainFrame.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
+        } else {
+            return session.superJSON.parse(await (target.mainFrame.executeJavaScript(generateScriptString({ session }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
+        }
+    };
+
     target
         .on('frame-created', async (_, details) => {
             if (details.frame) {
                 const frame = details.frame;
-                frame.evaluate = <A extends unknown[], R>(fn: (...args: A) => R, ...args: A): Promise<R> =>
-                    frame.executeJavaScript(generateScriptString({ session }, fn, ...args)).then(result => session.superJSON.parse(result as string));
+                frame.evaluate = async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
+                    if (typeof userGestureOrFn === 'boolean') {
+                        return session.superJSON.parse(await (target.mainFrame.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
+                    } else {
+                        return session.superJSON.parse(await (target.mainFrame.executeJavaScript(generateScriptString({ session }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
+                    }
+                };
             }
         });
     return session;

@@ -24,29 +24,31 @@ function convertToFunction(code: string) {
 declare global {
     interface Window {
         /**
-         * SuperJSON.
-         */
-        SuperJSON: SuperJSON;
-
-        /**
-         * Callback invocation sequence.
-         */
-        _callSeq?: bigint;
+          * SuperJSON.
+          */
+        '__cdp.superJSON': SuperJSON;
 
         /**
          * Method used internally by the exposeFunction method.
          */
-        _callback(payload: string): void;
+        '__cdp.callback'(payload: string): void;
 
-        /**
-         * Property used internally by the exposeFunction method.
-         */
-        _returnValues?: { [key: string]: Awaited<unknown> };
+        __cdp?: {
+            /**
+             * Callback invocation sequence.
+             */
+            callSequence: bigint;
 
-        /**
-         * Property used internally by the exposeFunction method.
-         */
-        _returnErrors?: { [key: string]: Awaited<unknown> };
+            /**
+             * Property used internally by the exposeFunction method.
+             */
+            returnValues: { [key: string]: { name?: string, args?: unknown[], init?: true, value?: Awaited<unknown> } };
+
+            /**
+             * Property used internally by the exposeFunction method.
+             */
+            returnErrors: { [key: string]: { name?: string, args?: unknown[], value?: Awaited<unknown> } };
+        }
     }
 }
 
@@ -70,14 +72,59 @@ export declare type Events = {
  * Options for exposing a function.
  */
 export interface ExposeFunctionOptions {
-    withReturnValue?: boolean | { timeout: number, delay: number };
+    /**
+     * If not specified or set to false, the function call result will not be awaited.
+     *
+     * If the function does not return a value, this property should either be omitted or set to false.
+     *
+     * - `false`, `undefined` : The function call result will not be awaited.
+     * - `true`, `{}` : The function call result will be awaited with the default settings for its sub-properties.
+     */
+    withReturnValue?: boolean | {
+        /**
+         * The maximum duration to wait for the function call result.
+         * If the result is not received within this time frame, the operation will be considered failed.
+         * Default: Infinity
+         */
+        timeout?: number;
+
+        /**
+         * The delay before starting to wait for the function result.
+         * This value represents the initial wait time before the function result is checked.
+         * Default: 1
+         */
+        delay?: number;
+
+        /**
+         * Indicates whether the function call should be retried if it fails.
+         * If not specified, no retries will be performed.
+         *
+         * - `false`, `undefined` : No retry attempts will be made. The function call will fail immediately if it encounters an error.
+         * - `true`, `{}`: The function call will be retried using the default retry configuration. By default, this means retries will continue indefinitely (if count is not specified) with a short delay between each attempt.
+         */
+        retry?: boolean | {
+            /**
+             * The maximum number of retry attempts.
+             * This value determines how many times the function call will be retried in case of failure.
+             * Default: Infinity
+             */
+            count?: number;
+
+            /**
+             * The delay between each retry attempt.
+             * This represents the amount of time to wait before making another retry after a failure.
+             * Default: 1
+             */
+            delay?: number;
+        };
+    };
 }
 
 export type CustomizeSuperJSONFunction = (superJSON: SuperJSON) => void;
 
 type ExposeFunction = {
     scriptId: Protocol.Page.ScriptIdentifier;
-    bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => Promise<void>;
+    bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => void;
 };
 
 /**
@@ -245,11 +292,11 @@ export class Session extends EventEmitter<Events> {
 
         await this.send('Page.addScriptToEvaluateOnNewDocument', {
             runImmediately: true,
-            source: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); window.SuperJSON = SuperJSON.default;`
+            source: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); window['__cdp.superJSON'] = SuperJSON.default;`
         });
 
         const buildParams = () => ({
-            expression: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); window.SuperJSON = SuperJSON.default;`,
+            expression: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); window['__cdp.superJSON'] = SuperJSON.default;`,
             throwOnSideEffect: false,
             awaitPromise: true,
             replMode: false,
@@ -335,7 +382,7 @@ export class Session extends EventEmitter<Events> {
         this.customizeSuperJSON = customizeSuperJSON;
 
         await this.send('Runtime.evaluate', {
-            expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window.SuperJSON);`,
+            expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window['__cdp.superJSON']);`,
             throwOnSideEffect: false,
             awaitPromise: true,
             replMode: false,
@@ -348,7 +395,7 @@ export class Session extends EventEmitter<Events> {
         for (const [contextId] of this.#executionContexts) {
             await this.send('Runtime.evaluate', {
                 contextId,
-                expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window.SuperJSON);`,
+                expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window['__cdp.superJSON']);`,
                 throwOnSideEffect: false,
                 awaitPromise: true,
                 replMode: false,
@@ -376,47 +423,78 @@ export class Session extends EventEmitter<Events> {
      * @param options - Options for exposing the function.
      */
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
-        await this.send('Runtime.addBinding', { name: '_callback' });
+        await this.send('Runtime.addBinding', { name: '__cdp.callback' });
         const attachFunction = (name: string, options?: ExposeFunctionOptions) => {
             // @ts-expect-error : window[name]
             window[name] = (...args: unknown[]) => {
-                if (window._callSeq === undefined) {
-                    window._callSeq = BigInt(0);
+                if (window.__cdp === undefined) {
+                    window.__cdp = {
+                        callSequence: BigInt(0),
+                        returnValues: {},
+                        returnErrors: {}
+                    };
                 }
-                const callSequence = `${window._callSeq++}-${Math.random()}`;
-                window._callback(window.SuperJSON.stringify({ callSequence, name, args }));
-                if (options === undefined) {
+
+                const cdp = window.__cdp;
+                const callSequence = `${cdp.callSequence++}-${Math.random()}`;
+                cdp.returnValues[callSequence] = { name, args };
+                cdp.returnErrors[callSequence] = { name, args };
+
+                window['__cdp.callback'](window['__cdp.superJSON'].stringify({ callSequence, name, args }));
+
+                if (!options?.withReturnValue) {
+                    delete cdp.returnValues[callSequence];
+                    delete cdp.returnErrors[callSequence];
                     return;
                 }
-                if (options.withReturnValue === undefined) {
-                    return;
-                }
+
+                const withReturnValue = typeof options.withReturnValue === 'object' ? options.withReturnValue : {};
                 const { promise, resolve, reject } = Promise.withResolvers();
-                const h = setInterval(() => {
+                const resultIntervalId = setInterval(() => {
                     try {
-                        if (window._returnValues && callSequence in window._returnValues) {
-                            resolve(window._returnValues[callSequence]);
-                            delete window._returnValues[callSequence];
-                            clearInterval(h);
+                        if (cdp.returnValues && callSequence in cdp.returnValues && 'value' in cdp.returnValues[callSequence]) {
+                            resolve(cdp.returnValues[callSequence].value);
                         }
-                        if (window._returnErrors && callSequence in window._returnErrors) {
-                            reject(window._returnErrors[callSequence] as Error);
-                            delete window._returnErrors[callSequence];
-                            clearInterval(h);
+                        if (cdp.returnErrors && callSequence in cdp.returnErrors && 'value' in cdp.returnErrors[callSequence]) {
+                            reject(cdp.returnErrors[callSequence].value as Error);
                         }
                     } catch (error) {
                         reject(error as Error);
                     }
-                }, typeof options.withReturnValue === 'object' ? options.withReturnValue.delay : 1);
-                if (typeof options.withReturnValue === 'object') {
-                    setTimeout(clearInterval.bind(h), options.withReturnValue.timeout);
+                }, withReturnValue.delay ?? 1);
+                promise.finally(() => {
+                    clearInterval(resultIntervalId);
+                    if (cdp.returnValues && callSequence in cdp.returnValues) {
+                        delete cdp.returnValues[callSequence];
+                    }
+                    if (cdp.returnErrors && callSequence in cdp.returnErrors) {
+                        delete cdp.returnErrors[callSequence];
+                    }
+                });
+                if (withReturnValue.retry) {
+                    const retry = withReturnValue.retry === true ? { delay: 1 } : withReturnValue.retry;
+                    const retryIntervalId = setInterval(() => {
+                        if ((retry.count !== undefined) && retry.count-- < 0) {
+                            reject(new Error('Failed after maximum retry attempts.'));
+                            return;
+                        }
+                        if (cdp.returnValues[callSequence].init) {
+                            return;
+                        }
+                        window['__cdp.callback'](window['__cdp.superJSON'].stringify({ callSequence, name, args }));
+                    }, retry.delay ?? 1);
+                    promise.finally(() => clearInterval(retryIntervalId));
                 }
+                if (withReturnValue.timeout !== undefined) {
+                    const timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), withReturnValue.timeout);
+                    promise.finally(() => clearTimeout(timeoutId));
+                }
+
                 return promise;
             };
-
         }
 
-        type Payload = { executionContextId?: Protocol.Runtime.ExecutionContextId, callSequence: string, name: string, args: A };
+        type Payload = { executionContextId?: Protocol.Runtime.ExecutionContextId, options?: EvaluateOptions, callSequence: string, name: string, args: A };
 
         const processBindingCall = async (executionContextId: number, payload: Payload) => {
             if (payload.executionContextId === undefined) {
@@ -435,33 +513,42 @@ export class Session extends EventEmitter<Events> {
                 console.error(`invalid context : (payload, ${JSON.stringify(payload)})`);
                 return;
             }
+
+            const withReturnValue = options?.withReturnValue;
+            const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
             try {
-                const ret = await fn(...payload.args);
-                if (options?.withReturnValue) {
-                    await context.evaluate((id, seq, ret) => {
-                        if (window._returnValues === undefined) {
-                            window._returnValues = {};
+                if (typeof withReturnValue === 'object' && withReturnValue.retry) {
+                    await context.evaluate({ timeout }, (id, seq) => {
+                        if (window.__cdp?.returnValues && seq in window.__cdp.returnValues) {
+                            window.__cdp.returnValues[seq].init = true;
                         }
-                        window._returnValues[seq] = ret;
+                    }, executionContextId, payload.callSequence);
+                }
+                const ret = await fn(...payload.args);
+
+                if (withReturnValue) {
+                    await context.evaluate({ timeout }, (id, seq, ret) => {
+                        if (window.__cdp?.returnValues && seq in window.__cdp.returnValues) {
+                            window.__cdp.returnValues[seq].value = ret;
+                        }
                     }, executionContextId, payload.callSequence, ret);
                 }
             } catch (error) {
                 if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                    if (options?.withReturnValue) {
-                        await context.evaluate((id, seq, error) => {
-                            if (window._returnErrors === undefined) {
-                                window._returnErrors = {};
+                    if (withReturnValue) {
+                        await context.evaluate({ timeout }, (id, seq, error) => {
+                            if (window.__cdp?.returnErrors && seq in window.__cdp.returnErrors) {
+                                window.__cdp.returnErrors[seq].value = error;
                             }
-                            window._returnErrors[seq] = error;
                         }, executionContextId, payload.callSequence, error);
                     }
                 }
             }
         }
 
-        const bindingCalled = async (event: Protocol.Runtime.BindingCalledEvent) => {
+        const bindingCalled = (event: Protocol.Runtime.BindingCalledEvent) => {
             try {
-                if (event.name === '_callback') {
+                if (event.name === '__cdp.callback') {
                     const payload: Payload = this.superJSON.parse(event.payload);
                     if (payload.name === name) {
                         processBindingCall(event.executionContextId, payload);
