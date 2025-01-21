@@ -1,7 +1,7 @@
 import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
-import { Debugger, WebContents } from 'electron';
+import { Debugger, session, WebContents } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
 import { readFileSync } from 'fs';
@@ -22,18 +22,18 @@ function convertToFunction(code: string) {
 }
 
 declare global {
-    interface Window {
+    namespace globalThis {
         /**
           * SuperJSON.
           */
-        '__cdp.superJSON': SuperJSON;
+        var __cdp_superJSON: SuperJSON;
 
         /**
          * Method used internally by the exposeFunction method.
          */
-        '__cdp.callback'(payload: string): void;
+        var __cdp_callback: (payload: string) => void;
 
-        __cdp?: {
+        var __cdp: {
             /**
              * Callback invocation sequence.
              */
@@ -48,7 +48,7 @@ declare global {
              * Property used internally by the exposeFunction method.
              */
             returnErrors: { [key: string]: { name?: string, args?: unknown[], value?: Awaited<unknown> } };
-        }
+        };
     }
 }
 
@@ -63,9 +63,10 @@ export declare interface CommandOptions {
  * Type mapping for events.
  */
 export declare type Events = {
-    [Property in keyof ProtocolMapping.Events]: ProtocolMapping.Events[Property];
+    [Property in keyof ProtocolMapping.Events]: [...ProtocolMapping.Events[Property], sessionId?: Protocol.Target.SessionID];
 } & {
     'execution-context-created': [ExecutionContext];
+    'execution-context-destroyed': [Protocol.Runtime.ExecutionContextDestroyedEvent & { sessionId?: Protocol.Target.SessionID }];
 };
 
 /**
@@ -132,16 +133,20 @@ export interface ExposeFunctionOptions {
 
 export type CustomizeSuperJSONFunction = (superJSON: SuperJSON) => void;
 
-type ExposeFunction = {
-    scriptId: Protocol.Page.ScriptIdentifier;
-    bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => void;
-};
+type XOR<T1, T2> = (T1 | T2) extends object ? (T1 extends T2 ? never : T1) | (T2 extends T1 ? never : T2) : T1 | T2;
+
+type ExposeFunction =
+    XOR<{ executionContextCreated: (context: ExecutionContext) => Promise<void>; },
+        { scriptId: Protocol.Page.ScriptIdentifier; }> & {
+            bindingCalled: (event: Protocol.Runtime.BindingCalledEvent) => void;
+        };
 
 /**
  * Represents a session for interacting with the browser's DevTools protocol.
  */
 export class Session extends EventEmitter<Events> {
 
+    readonly id?: Protocol.Target.SessionID;
     #superJSON: SuperJSON;
     #customizeSuperJSON: CustomizeSuperJSONFunction = () => { };
 
@@ -201,29 +206,42 @@ export class Session extends EventEmitter<Events> {
         throw new Error('invalid parameter');
     }
 
+    private fromSessionId(sessionId: Protocol.Target.SessionID) {
+        return new Session(this.webContents, sessionId);
+    }
+
     /**
      * Creates a new Session instance.
      *
-     * @param window - The web contents associated with this session.
+     * @param webContents - The web contents associated with this session.
+     * @param sessionId -
      */
-    constructor(webContents: WebContents) {
+    constructor(webContents: WebContents, sessionId?: Protocol.Target.SessionID) {
         super();
+        this.id = sessionId;
         this.#superJSON = new SuperJSON();
         registerTypes(this.#superJSON);
 
         this.webContents = webContents;
         this.#debugger = webContents.debugger;
-        this.#debugger.on('message', (_, method, params) => {
-            this.emit(method as keyof ProtocolMapping.Events, params);
+        this.#debugger.on('message', (_, method, params, sessionId) => {
+            if (this.id === undefined && sessionId !== '') {
+                return;
+            }
+            if (this.id && this.id !== sessionId) {
+                return;
+            }
+            this.emit(method as keyof ProtocolMapping.Events, params, sessionId || undefined);
             switch (method) {
                 case 'Runtime.executionContextCreated': {
                     const event = params as Protocol.Runtime.ExecutionContextCreatedEvent;
-                    const ctx = new ExecutionContext(this, event.context);
+                    const ctx = new ExecutionContext(sessionId ? this.fromSessionId(sessionId) : this, event.context);
                     this.#executionContexts.set(event.context.id, ctx);
                     this.emit('execution-context-created', ctx);
                     break;
                 }
                 case 'Runtime.executionContextDestroyed':
+                    this.emit('execution-context-destroyed', { ...params, sessionId });
                     this.#executionContexts.delete((params as Protocol.Runtime.ExecutionContextDestroyedEvent).executionContextId);
                     break;
                 case 'Runtime.executionContextsCleared':
@@ -255,7 +273,7 @@ export class Session extends EventEmitter<Events> {
         if (!this.#debugger.isAttached()) {
             throw new Error('not attached');
         }
-        return this.#debugger.sendCommand(method, params);
+        return this.#debugger.sendCommand(method, params, this.id);
     }
 
     /**
@@ -300,13 +318,18 @@ export class Session extends EventEmitter<Events> {
             this.customizeSuperJSON = customizeSuperJSON;
         }
 
-        await this.send('Page.addScriptToEvaluateOnNewDocument', {
-            runImmediately: true,
-            source: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); window['__cdp.superJSON'] = SuperJSON.default;`
-        });
+        try {
+            await this.send('Page.addScriptToEvaluateOnNewDocument', {
+                runImmediately: true,
+                source: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;`
+            });
+        } catch (error) {
+            this.on('Runtime.executionContextCreated', event =>
+                this.send('Runtime.evaluate', { ...buildParams(), contextId: event.context.id, }).catch(console.error));
+        }
 
         const buildParams = () => ({
-            expression: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); window['__cdp.superJSON'] = SuperJSON.default;`,
+            expression: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;`,
             throwOnSideEffect: false,
             awaitPromise: true,
             replMode: false,
@@ -392,7 +415,7 @@ export class Session extends EventEmitter<Events> {
         this.customizeSuperJSON = customizeSuperJSON;
 
         await this.send('Runtime.evaluate', {
-            expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window['__cdp.superJSON']);`,
+            expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.__cdp_superJSON);`,
             throwOnSideEffect: false,
             awaitPromise: true,
             replMode: false,
@@ -405,7 +428,7 @@ export class Session extends EventEmitter<Events> {
         for (const [contextId] of this.#executionContexts) {
             await this.send('Runtime.evaluate', {
                 contextId,
-                expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(window['__cdp.superJSON']);`,
+                expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.__cdp_superJSON);`,
                 throwOnSideEffect: false,
                 awaitPromise: true,
                 replMode: false,
@@ -433,24 +456,24 @@ export class Session extends EventEmitter<Events> {
      * @param options - Options for exposing the function.
      */
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
-        await this.send('Runtime.addBinding', { name: '__cdp.callback' });
+        await this.send('Runtime.addBinding', { name: '__cdp_callback' });
         const attachFunction = (name: string, options?: ExposeFunctionOptions) => {
-            // @ts-expect-error : window[name]
-            window[name] = (...args: unknown[]) => {
-                if (window.__cdp === undefined) {
-                    window.__cdp = {
+            // @ts-expect-error : globalThis[name]
+            globalThis[name] = (...args: unknown[]) => {
+                if (globalThis.__cdp === undefined) {
+                    globalThis.__cdp = {
                         callSequence: BigInt(0),
                         returnValues: {},
                         returnErrors: {}
                     };
                 }
 
-                const cdp = window.__cdp;
+                const cdp = globalThis.__cdp;
                 const callSequence = `${cdp.callSequence++}-${Math.random()}`;
                 cdp.returnValues[callSequence] = { name, args };
                 cdp.returnErrors[callSequence] = { name, args };
 
-                window['__cdp.callback'](window['__cdp.superJSON'].stringify({ callSequence, name, args }));
+                globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
 
                 const { promise, resolve, reject } = Promise.withResolvers();
 
@@ -464,7 +487,7 @@ export class Session extends EventEmitter<Events> {
                             console.warn('Failed after maximum retry attempts.');
                             return;
                         }
-                        window['__cdp.callback'](window['__cdp.superJSON'].stringify({ callSequence, name, args }));
+                        globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
                     }, retry.delay ?? 1);
                     promise.finally(() => clearInterval(retryIntervalId));
                 }
@@ -532,8 +555,8 @@ export class Session extends EventEmitter<Events> {
             try {
                 if (options?.retry) {
                     await context.evaluate({ timeout }, (id, seq) => {
-                        if (window.__cdp?.returnValues && seq in window.__cdp.returnValues) {
-                            window.__cdp.returnValues[seq].init = true;
+                        if (globalThis.__cdp?.returnValues && seq in globalThis.__cdp.returnValues) {
+                            globalThis.__cdp.returnValues[seq].init = true;
                         }
                     }, executionContextId, payload.callSequence);
                 }
@@ -541,8 +564,8 @@ export class Session extends EventEmitter<Events> {
 
                 if (withReturnValue) {
                     await context.evaluate({ timeout }, (id, seq, ret) => {
-                        if (window.__cdp?.returnValues && seq in window.__cdp.returnValues) {
-                            window.__cdp.returnValues[seq].value = ret;
+                        if (globalThis.__cdp?.returnValues && seq in globalThis.__cdp.returnValues) {
+                            globalThis.__cdp.returnValues[seq].value = ret;
                         }
                     }, executionContextId, payload.callSequence, ret);
                 }
@@ -550,8 +573,8 @@ export class Session extends EventEmitter<Events> {
                 if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                     if (withReturnValue) {
                         await context.evaluate({ timeout }, (id, seq, error) => {
-                            if (window.__cdp?.returnErrors && seq in window.__cdp.returnErrors) {
-                                window.__cdp.returnErrors[seq].value = error;
+                            if (globalThis.__cdp?.returnErrors && seq in globalThis.__cdp.returnErrors) {
+                                globalThis.__cdp.returnErrors[seq].value = error;
                             }
                         }, executionContextId, payload.callSequence, error);
                     }
@@ -561,7 +584,7 @@ export class Session extends EventEmitter<Events> {
 
         const bindingCalled = (event: Protocol.Runtime.BindingCalledEvent) => {
             try {
-                if (event.name === '__cdp.callback') {
+                if (event.name === '__cdp_callback') {
                     const payload: Payload = this.superJSON.parse(event.payload);
                     if (payload.name === name) {
                         processBindingCall(event.executionContextId, payload);
@@ -576,13 +599,34 @@ export class Session extends EventEmitter<Events> {
 
         this.on('Runtime.bindingCalled', bindingCalled);
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
-        this.#exposeFunctions.set(name, {
-            scriptId: (await this.send('Page.addScriptToEvaluateOnNewDocument', {
-                runImmediately: true,
-                source: generateScriptString({ session: this }, attachFunction, name, options)
-            })).identifier,
-            bindingCalled
-        });
+
+        let entry;
+        try {
+            entry = {
+                scriptId: (await this.send('Page.addScriptToEvaluateOnNewDocument', {
+                    runImmediately: true,
+                    source: generateScriptString({ session: this }, attachFunction, name, options)
+                })).identifier,
+                bindingCalled
+            };
+        } catch (error) {
+            const executionContextCreated = async (context: ExecutionContext) => {
+                try {
+                    await context.evaluate(attachFunction, name, options);
+                } catch (error) {
+                    if ((error as Error).message !== 'Cannot find context with specified id') {
+                        console.debug(error);
+                    }
+                }
+            };
+            this.on('execution-context-created', executionContextCreated);
+            entry = {
+                executionContextCreated,
+                bindingCalled
+            };
+        }
+        this.#exposeFunctions.set(name, entry);
+
         try {
             await this.evaluate(attachFunction, name, options);
         } catch (error) {
@@ -632,10 +676,14 @@ export class Session extends EventEmitter<Events> {
         name: string,
         entry: ExposeFunction) {
         this.off('Runtime.bindingCalled', entry.bindingCalled);
-        await this.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.scriptId });
+        if ('scriptId' in entry) {
+            await this.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.scriptId });
+        } else {
+            this.off('execution-context-created', entry.executionContextCreated);
+        }
         if (!this.webContents.isDestroyed()) {
-            // @ts-expect-error : window[name]
-            await Promise.all(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete window[name], name)));
+            // @ts-expect-error : globalThis[name]
+            await Promise.all(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name)));
         }
     }
 }

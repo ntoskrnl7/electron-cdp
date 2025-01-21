@@ -8,26 +8,26 @@ const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toSt
 export function generateScriptString<T, A extends unknown[]>(options: ({ session?: Session, timeout?: number; }) | undefined, fn: (...args: A) => T, ...args: A) {
     return (options?.session?.webContents.hasSuperJSON ? `
         (async () => {
-            if (window['__cdp.superJSON'] === undefined) {
+            if (globalThis.__cdp_superJSON === undefined) {
                 try {
-                    window['__cdp.superJSON'] = window.top['__cdp.superJSON'];
+                    globalThis.__cdp_superJSON = globalThis.top.__cdp_superJSON;
                 } catch (error) {
                 }
-                if (window['__cdp.superJSON'] === undefined) {
-                    for (const w of Array.from(window)) {
+                if (globalThis.__cdp_superJSON === undefined) {
+                    for (const w of Array.from(globalThis)) {
                         try {
-                            if (w['__cdp.superJSON']) {
-                                window['__cdp.superJSON'] = w['__cdp.superJSON'];
+                            if (w.__cdp_superJSON) {
+                                globalThis.__cdp_superJSON = w.__cdp_superJSON;
                                 break;
                             }
                         } catch (error) {
                         }
                     }
                 }
-                if (window['__cdp.superJSON'] === undefined) {
+                if (globalThis.__cdp_superJSON === undefined) {
                     await new Promise(resolve => {
                         const h = setInterval(() => {
-                            if (window['__cdp.superJSON'] !== undefined) {
+                            if (globalThis.__cdp_superJSON !== undefined) {
                             clearInterval(h);
                             resolve();
                             }
@@ -38,23 +38,23 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
                         }, ${options?.timeout ?? 5000});
                     });
                 }
-                if (window['__cdp.superJSON'] === undefined) {
-                    console.error('window['__cdp.superJSON'] === undefined');
+                if (globalThis.__cdp_superJSON === undefined) {
+                    console.error('globalThis.__cdp_superJSON === undefined');
                     debugger;
-                    throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + window._executionContextId + ')');
+                    throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + globalThis._executionContextId + ')');
                 }
             }`
         :
         `
-        ${SuperJSONScript}; (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); window['__cdp.superJSON'] = SuperJSON.default;
+        ${SuperJSONScript}; (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;
         (async () => {
         `)
         +
         `
             ;;(${applyGlobal.toString()})();;
             const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-            const args = window['__cdp.superJSON'].parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(args) : SuperJSON.stringify(args))});
+            const args = globalThis.__cdp_superJSON.parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(args) : SuperJSON.stringify(args))});
             const result = await fn(...args);
-            return window['__cdp.superJSON'].stringify(result);
+            return globalThis.__cdp_superJSON.stringify(result);
         })();`
 }
