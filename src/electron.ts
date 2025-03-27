@@ -90,10 +90,8 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
         if (frame) {
             await frame.executeJavaScript(`
                 if (globalThis.__cdp_frameIdResolve) {
-                    console.debug('[frameId] frame-created: globalThis.__cdp_frameIdResolve : ${frame.processId}-${frame.routingId}');
                     globalThis.__cdp_frameIdResolve('${frame.processId}-${frame.routingId}');
                 } else {
-                    console.debug('[frameId] frame-created: globalThis.__cdp_frameId : ${frame.processId}-${frame.routingId}');
                     globalThis.__cdp_frameId = Promise.resolve('${frame.processId}-${frame.routingId}');
                 }`);
         }

@@ -483,6 +483,11 @@ export class Session extends EventEmitter<Events> {
             const mode = options?.mode ?? 'Electron';
             if (mode === 'Electron') {
                 globalThis.__cdp_callback = payload => {
+                    if (globalThis.__cdp_frameId === undefined) {
+                        const { promise, resolve } = Promise.withResolvers<FrameId>();
+                        globalThis.__cdp_frameId = promise;
+                        globalThis.__cdp_frameIdResolve = resolve;
+                    }
                     globalThis.__cdp_frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload })));
                 }
             }
