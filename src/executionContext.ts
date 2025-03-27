@@ -129,6 +129,6 @@ export class ExecutionContext {
             throw convertExceptionDetailsToError(res.exceptionDetails);
         }
 
-        return res.result?.value === undefined ? undefined : this.session.superJSON.parse<any>(res.result.value);
+        return res.result?.value === undefined ? undefined as T : this.session.superJSON.parse<any>(res.result.value);
     }
 }
