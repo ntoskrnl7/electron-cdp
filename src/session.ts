@@ -1,7 +1,7 @@
 import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
-import { Debugger, WebContents, webFrameMain } from 'electron';
+import { Debugger, WebContents, WebFrameMain, webFrameMain } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
 import { readFileSync } from 'fs';
@@ -630,6 +630,17 @@ export class Session extends EventEmitter<Events> {
             if (details.level === 'debug' && details.message.startsWith('cdp-utils-')) {
                 const { sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length));
                 const frame = frameId ? getWebFrameFromFrameId(frameId) ?? details.frame : details.frame;
+
+                if (frame.evaluate === undefined) {
+                    frame.evaluate = async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
+                        if (typeof userGestureOrFn === 'boolean') {
+                            return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
+                        } else {
+                            return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
+                        }
+                    };
+                }
+
                 if (sessionId === this.id) {
                     const payload: Payload = this.superJSON.parse(payloadString);
                     if (payload.name === name) {
