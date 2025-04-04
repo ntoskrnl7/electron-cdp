@@ -6,6 +6,14 @@ import { SuperJSON } from ".";
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
 
 export function generateScriptString<T, A extends unknown[]>(options: ({ session?: Session, timeout?: number; }) | undefined, fn: (...args: A) => T, ...args: A) {
+
+    const argsPacked = args.map(arg => (typeof arg === 'function' ? arg.toString() : arg));
+    const argsCode = argsPacked.map((arg, index) => {
+        if (typeof arg === 'string' && arg.startsWith('function')) {
+            return `args[${index}] = ${arg.toString()};`;
+        }
+        return '';
+    }).join(';\n');
     return (options?.session?.webContents.hasSuperJSON ? `
         (async () => {
             if (globalThis.__cdp_superJSON === undefined) {
@@ -52,8 +60,9 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
         +
         `
             ;;(${applyGlobal.toString()})();;
-            const fn = new Function('return ' + ${JSON.stringify(fn.toString())})();
-            const args = globalThis.__cdp_superJSON.parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(args) : SuperJSON.stringify(args))});
+            const fn = ${fn.toString()};
+            const args = globalThis.__cdp_superJSON.parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(argsPacked) : SuperJSON.stringify(argsPacked))});
+            ${argsCode}
             const result = await fn(...args);
             return globalThis.__cdp_superJSON.stringify(result);
         })();`

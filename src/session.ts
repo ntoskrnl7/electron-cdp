@@ -1,7 +1,7 @@
 import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
-import { Debugger, WebContents, WebFrameMain, webFrameMain } from 'electron';
+import { Debugger, WebContents, webFrameMain } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
 import { readFileSync } from 'fs';
