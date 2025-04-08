@@ -1,7 +1,7 @@
 import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
-import { Debugger, WebContents, webFrameMain } from 'electron';
+import Electron, { Debugger, WebContents, webFrameMain } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
 import { readFileSync } from 'fs';
@@ -154,10 +154,18 @@ export interface ExposeFunctionOptions {
 
 export type CustomizeSuperJSONFunction = (superJSON: SuperJSON) => void;
 
-type XOR<T1, T2> = (T1 | T2) extends object ? (T1 extends T2 ? never : T1) | (T2 extends T1 ? never : T2) : T1 | T2;
+type XOR<T extends any[]> = T extends [infer T1, infer T2]
+    ? XOR_<T1, T2>
+    : T extends [infer T1, infer T2, ...infer Rest]
+    ? XOR_<T1, XOR<[T2, ...Rest]>>
+    : never;
+
+type XOR_<T1, T2> = (T1 | T2) extends object
+    ? (T1 extends T2 ? never : T1) | (T2 extends T1 ? never : T2)
+    : T1 | T2;
 
 type ExposeFunction =
-    XOR<{ executionContextCreated: (context: ExecutionContext) => Promise<void>; }, { scriptId: Protocol.Page.ScriptIdentifier; }>
+    XOR<[{ executionContextCreated: (context: ExecutionContext) => Promise<void>; }, { frameCreated: (event: Electron.Event, details: Electron.FrameCreatedDetails) => void }, { scriptId: Protocol.Page.ScriptIdentifier; }]>
     &
     { removeHandler: () => void };
 
@@ -338,21 +346,18 @@ export class Session extends EventEmitter<Events> {
             this.customizeSuperJSON = customizeSuperJSON;
         }
 
+        const source = `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;`;
         try {
-            await this.send('Page.addScriptToEvaluateOnNewDocument', {
-                runImmediately: true,
-                source: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;`
-            });
+            await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
-            this.#webContents.on('frame-created', (_, details) => {
-                if (details.frame) {
-                    details.frame.executeJavaScript(`${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;`);
-                }
-            });
+            this.#webContents.on('frame-created', (_, details) => details.frame?.executeJavaScript(source).catch(console.error));
+            for (const frame of this.#webContents.mainFrame.framesInSubtree) {
+                frame.executeJavaScript(source).catch(console.error);
+            }
         }
 
         const buildParams = () => ({
-            expression: `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;`,
+            expression: source,
             throwOnSideEffect: false,
             awaitPromise: true,
             replMode: false,
@@ -362,8 +367,8 @@ export class Session extends EventEmitter<Events> {
             includeCommandLineAPI: false
         });
         await this.send('Runtime.evaluate', buildParams()).catch(console.error);
-        for (const context of this.executionContexts.values()) {
-            this.send('Runtime.evaluate', { ...buildParams(), contextId: context.id, }).catch(console.error);
+        for (const contextId of this.#executionContexts.keys()) {
+            this.send('Runtime.evaluate', { ...buildParams(), contextId }).catch(console.error);
         }
         this.#webContents.hasSuperJSON = true;
     }
@@ -437,8 +442,13 @@ export class Session extends EventEmitter<Events> {
 
         this.customizeSuperJSON = customizeSuperJSON;
 
-        await this.send('Runtime.evaluate', {
-            expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.__cdp_superJSON);`,
+        let promises = [];
+        const expression = `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.__cdp_superJSON);`;
+        for (const frame of this.#webContents.mainFrame.framesInSubtree) {
+            promises.push(frame.executeJavaScript(expression));
+        }
+        promises.push(this.send('Runtime.evaluate', {
+            expression,
             throwOnSideEffect: false,
             awaitPromise: true,
             replMode: false,
@@ -446,12 +456,12 @@ export class Session extends EventEmitter<Events> {
             generatePreview: false,
             silent: true,
             includeCommandLineAPI: false,
-        });
+        }));
 
-        for (const [contextId] of this.#executionContexts) {
-            await this.send('Runtime.evaluate', {
+        for (const contextId of this.#executionContexts.keys()) {
+            promises.push(this.send('Runtime.evaluate', {
                 contextId,
-                expression: `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.__cdp_superJSON);`,
+                expression,
                 throwOnSideEffect: false,
                 awaitPromise: true,
                 replMode: false,
@@ -459,8 +469,10 @@ export class Session extends EventEmitter<Events> {
                 generatePreview: false,
                 silent: true,
                 includeCommandLineAPI: false,
-            });
+            }));
         }
+
+        await Promise.allSettled(promises);
     }
 
 
@@ -479,8 +491,15 @@ export class Session extends EventEmitter<Events> {
      * @param options - Options for exposing the function.
      */
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
-        const attachFunction = (name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID) => {
+        const attachFunction = (name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
             const mode = options?.mode ?? 'Electron';
+            if (frameId) {
+                if (globalThis.__cdp_frameId === undefined) {
+                    globalThis.__cdp_frameId = Promise.resolve(frameId);
+                } else if (globalThis.__cdp_frameIdResolve) {
+                    globalThis.__cdp_frameIdResolve(frameId);
+                }
+            }
             if (mode === 'Electron') {
                 globalThis.__cdp_callback = payload => {
                     if (globalThis.__cdp_frameId === undefined) {
@@ -713,39 +732,62 @@ export class Session extends EventEmitter<Events> {
                 removeHandler
             };
         } catch (error) {
-            const executionContextCreated = async (context: ExecutionContext) => {
-                try {
-                    await context.evaluate(attachFunction, name, options, this.id);
-                } catch (error) {
-                    if ((error as Error).message !== 'Cannot find context with specified id') {
-                        console.debug(error);
+            if (mode === 'CDP') {
+                const executionContextCreated = async (context: ExecutionContext) => {
+                    try {
+                        await context.evaluate(attachFunction, name, options, this.id);
+                    } catch (error) {
+                        if ((error as Error).message !== 'Cannot find context with specified id') {
+                            console.debug(error);
+                        }
                     }
-                }
-            };
-            this.on('execution-context-created', executionContextCreated);
-            entry = {
-                executionContextCreated,
-                removeHandler
-            };
+                };
+                this.on('execution-context-created', executionContextCreated);
+                entry = {
+                    executionContextCreated,
+                    removeHandler
+                };
+            } else {
+                const frameCreated = async (event: Electron.Event, details: Electron.FrameCreatedDetails) => {
+                    try {
+                        details.frame?.evaluate(attachFunction, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
+                    } catch (error) {
+                        if ((error as Error).message !== 'Cannot find context with specified id') {
+                            console.debug(error);
+                        }
+                    }
+                };
+                this.#webContents.on('frame-created', frameCreated);
+                entry = {
+                    frameCreated,
+                    removeHandler
+                };
+            }
         }
         this.#exposeFunctions.set(name, entry);
 
-        try {
-            await this.evaluate(attachFunction, name, options, this.id);
-        } catch (error) {
+        let promises = [];
+
+        for (const frame of this.#webContents.mainFrame.framesInSubtree) {
+            promises.push(frame.evaluate(attachFunction, name, options, this.id, `${frame.processId}-${frame.routingId}`).catch(console.debug));
+        }
+
+        promises.push(this.evaluate(attachFunction, name, options, this.id).catch(error => {
             if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                 console.debug(error);
             }
-        }
-        for (const ctx of this.executionContexts.values()) {
-            try {
-                await ctx.evaluate(attachFunction, name, options, this.id);
-            } catch (error) {
+        }));
+        for (const ctx of this.#executionContexts.values()) {
+            promises.push(ctx.evaluate(attachFunction, name, options, this.id).catch(error => {
                 if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                     console.debug(error);
                 }
-            }
+            }));
         }
+
+        this.#webContents.on('destroyed', () => this.#removeExposedFunction(name, entry));
+
+        await Promise.allSettled(promises);
     }
 
     /**
@@ -779,12 +821,14 @@ export class Session extends EventEmitter<Events> {
         entry.removeHandler();
         if ('scriptId' in entry) {
             await this.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.scriptId });
-        } else {
+        } else if ('executionContextCreated' in entry) {
             this.off('execution-context-created', entry.executionContextCreated);
+        } else {
+            this.#webContents.off('frame-created', entry.frameCreated);
         }
         if (!this.#webContents.isDestroyed()) {
             // @ts-expect-error : globalThis[name]
-            await Promise.all(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name)));
+            await Promise.allSettled(this.#webContents.mainFrame.framesInSubtree.map(frame => frame.evaluate(name => delete globalThis[name], name)).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name))));
         }
     }
 
