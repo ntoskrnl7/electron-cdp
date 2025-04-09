@@ -785,8 +785,6 @@ export class Session extends EventEmitter<Events> {
             }));
         }
 
-        this.#webContents.on('destroyed', () => this.#removeExposedFunction(name, entry));
-
         await Promise.allSettled(promises);
     }
 
@@ -826,10 +824,8 @@ export class Session extends EventEmitter<Events> {
         } else {
             this.#webContents.off('frame-created', entry.frameCreated);
         }
-        if (!this.#webContents.isDestroyed()) {
-            // @ts-expect-error : globalThis[name]
-            await Promise.allSettled(this.#webContents.mainFrame.framesInSubtree.map(frame => frame.evaluate(name => delete globalThis[name], name)).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name))));
-        }
+        // @ts-expect-error : globalThis[name]
+        await Promise.allSettled(this.#webContents.mainFrame.framesInSubtree.map(frame => frame.evaluate(name => delete globalThis[name], name)).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name))));
     }
 
     set webContents(newWebContents: WebContents) {

@@ -1,6 +1,6 @@
 {
   "name": "electron-cdp-utils",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "author": "ntoskrnl7@gmail.com",
   "license": "ISC",
   "main": "index.js",
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "buffer": "^6.0.3",
-    "devtools-protocol": "^0.0.1443047",
+    "devtools-protocol": "^0.0.1443917",
     "events": "^3.3.0",
     "superjson": "^2.2.2"
   },
