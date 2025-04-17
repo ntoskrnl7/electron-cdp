@@ -1,6 +1,6 @@
 {
   "name": "electron-cdp-utils",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "author": "ntoskrnl7@gmail.com",
   "license": "ISC",
   "main": "index.js",
@@ -10,13 +10,13 @@
   },
   "dependencies": {
     "buffer": "^6.0.3",
-    "devtools-protocol": "^0.0.1443917",
+    "devtools-protocol": "^0.0.1448144",
     "events": "^3.3.0",
     "superjson": "^2.2.2"
   },
   "devDependencies": {
     "@babel/preset-typescript": "^7.27.0",
-    "electron": "^35.1.4",
+    "electron": "^35.1.5",
     "esbuild": "^0.25.2",
     "typescript": "^5.8.3"
   },

@@ -40,7 +40,7 @@ declare global {
         /**
          * Method used internally by the exposeFunction method.
          */
-        var __cdp_callback: (payload: string) => void;
+        var __cdp_callback: (payload: string, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => void;
 
         var __cdp: {
             /**
@@ -501,13 +501,17 @@ export class Session extends EventEmitter<Events> {
                 }
             }
             if (mode === 'Electron') {
-                globalThis.__cdp_callback = payload => {
+                globalThis.__cdp_callback = (payload, sessionId, frameId) => {
                     if (globalThis.__cdp_frameId === undefined) {
                         const { promise, resolve } = Promise.withResolvers<FrameId>();
                         globalThis.__cdp_frameId = promise;
                         globalThis.__cdp_frameIdResolve = resolve;
                     }
-                    globalThis.__cdp_frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload })));
+                    if (frameId) {
+                        console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload }));
+                    } else {
+                        globalThis.__cdp_frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload })));
+                    }
                 }
             }
 
@@ -526,7 +530,11 @@ export class Session extends EventEmitter<Events> {
                 cdp.returnValues[callSequence] = { name, args };
                 cdp.returnErrors[callSequence] = { name, args };
 
-                globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
+                if (mode === 'Electron') {
+                    globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }), sessionId, frameId);
+                } else {
+                    globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
+                }
 
                 const { promise, resolve, reject } = Promise.withResolvers();
 
@@ -540,7 +548,11 @@ export class Session extends EventEmitter<Events> {
                             console.warn('Failed after maximum retry attempts.');
                             return;
                         }
-                        globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
+                        if (mode === 'Electron') {
+                            globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }), sessionId, frameId);
+                        } else {
+                            globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
+                        }
                     }, retry.delay ?? 1);
                     promise.finally(() => clearInterval(retryIntervalId));
                 }
