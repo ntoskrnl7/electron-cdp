@@ -16,26 +16,27 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
     }).join(';\n');
     return (options?.session?.webContents.hasSuperJSON ? `
         (async () => {
-            if (globalThis.__cdp_superJSON === undefined) {
+            globalThis.$cdp ??= {};
+            if (globalThis.$cdp.superJSON === undefined) {
                 try {
-                    globalThis.__cdp_superJSON = globalThis.top.__cdp_superJSON;
+                    globalThis.$cdp.superJSON = globalThis.top.$cdp.superJSON;
                 } catch (error) {
                 }
-                if (globalThis.__cdp_superJSON === undefined) {
+                if (globalThis.$cdp.superJSON === undefined) {
                     for (const w of Array.from(globalThis)) {
                         try {
-                            if (w.__cdp_superJSON) {
-                                globalThis.__cdp_superJSON = w.__cdp_superJSON;
+                            if (w.$cdp.superJSON) {
+                                globalThis.$cdp.superJSON = w.$cdp.superJSON;
                                 break;
                             }
                         } catch (error) {
                         }
                     }
                 }
-                if (globalThis.__cdp_superJSON === undefined) {
+                if (globalThis.$cdp.superJSON === undefined) {
                     await new Promise(resolve => {
                         const h = setInterval(() => {
-                            if (globalThis.__cdp_superJSON !== undefined) {
+                            if (globalThis.$cdp.superJSON !== undefined) {
                             clearInterval(h);
                             resolve();
                             }
@@ -46,28 +47,28 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
                         }, ${options?.timeout ?? 5000});
                     });
                 }
-                if (globalThis.__cdp_superJSON === undefined) {
-                    console.error('globalThis.__cdp_superJSON === undefined');
+                if (globalThis.$cdp.superJSON === undefined) {
+                    console.error('globalThis.$cdp.superJSON === undefined');
                     debugger;
                     throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + globalThis._executionContextId + ')');
                 }
             }`
         :
         `
-        ${SuperJSONScript}; (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;
+        ${SuperJSONScript}; (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;
         (async () => {
         `)
         +
         `
             ;;(${applyGlobal.toString()})();;
             const fn = ${fn.toString()};
-            const args = globalThis.__cdp_superJSON.parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(argsPacked) : SuperJSON.stringify(argsPacked))});
+            const args = globalThis.$cdp.superJSON.parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(argsPacked) : SuperJSON.stringify(argsPacked))});
             ${argsCode}
             try {
                 const result = await fn(...args);
-                return globalThis.__cdp_superJSON.stringify(result);
+                return globalThis.$cdp.superJSON.stringify(result);
             } catch (error) {
-                throw globalThis.__cdp_superJSON.stringify(error);
+                throw globalThis.$cdp.superJSON.stringify(error);
             }
         })();`
 }

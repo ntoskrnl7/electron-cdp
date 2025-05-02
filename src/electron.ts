@@ -79,10 +79,11 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
     await session.send('Page.addScriptToEvaluateOnNewDocument', {
         runImmediately: true,
         source: `
-            if (globalThis.__cdp_frameId === undefined) {
+            globalThis.$cdp ??= {};
+            if (globalThis.$cdp.frameId === undefined) {
                 const { promise, resolve } = Promise.withResolvers();
-                globalThis.__cdp_frameId = promise;
-                globalThis.__cdp_frameIdResolve = resolve;
+                globalThis.$cdp.frameId = promise;
+                globalThis.$cdp.frameIdResolve = resolve;
             }`
     });
 
@@ -102,10 +103,12 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
         if (frame && !frame.isDestroyed()) {
             frame.evaluate = evaluate;
             await frame.executeJavaScript(`
-                if (globalThis.__cdp_frameIdResolve) {
-                    globalThis.__cdp_frameIdResolve('${frame.processId}-${frame.routingId}');
+                globalThis.$cdp ??= {};
+                if (globalThis.$cdp.frameIdResolve) {
+                    globalThis.$cdp.frameIdResolve('${frame.processId}-${frame.routingId}');
+                    delete globalThis.$cdp.frameIdResolve;
                 } else {
-                    globalThis.__cdp_frameId = Promise.resolve('${frame.processId}-${frame.routingId}');
+                    globalThis.$cdp.frameId = Promise.resolve('${frame.processId}-${frame.routingId}');
                 }`);
         }
     };

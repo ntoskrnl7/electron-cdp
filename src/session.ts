@@ -30,42 +30,40 @@ function getWebFrameFromFrameId(frameId: FrameId) {
 declare global {
     namespace globalThis {
         // eslint-disable-next-line no-var
-        var __cdp_frameId: Promise<FrameId>;
+        var $cdp: {
 
-        // eslint-disable-next-line no-var
-        var __cdp_frameIdResolve: (id: FrameId) => void;
+            frameId?: Promise<FrameId>;
 
-        /**
-          * SuperJSON.
-          */
-        // eslint-disable-next-line no-var
-        var __cdp_superJSON: SuperJSON;
-
-        /**
-         * Method used internally by the exposeFunction method.
-         */
-        // eslint-disable-next-line no-var
-        var __cdp_callback: (payload: string, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => void;
-
-        var __cdp: {
-            /**
-             * Callback invocation sequence.
-             */
-            // eslint-disable-next-line no-var
-            callSequence: bigint;
+            frameIdResolve?: (id: FrameId) => void;
 
             /**
-             * Property used internally by the exposeFunction method.
+             * SuperJSON.
              */
-            // eslint-disable-next-line no-var
-            returnValues: { [key: string]: { name?: string, args?: unknown[], init?: true, value?: Awaited<unknown> } };
+            superJSON: SuperJSON;
 
-            /**
-             * Property used internally by the exposeFunction method.
-             */
-            // eslint-disable-next-line no-var
-            returnErrors: { [key: string]: { name?: string, args?: unknown[], value?: Awaited<unknown> } };
+            callback: {
+                invoke?: (payload: string, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => void;
+
+                /**
+                 * Callback invocation sequence.
+                 */
+                sequence: bigint;
+
+                /**
+                 * Property used internally by the exposeFunction method.
+                 */
+                returnValues: { [key: string]: { name?: string, args?: unknown[], init?: true, value?: Awaited<unknown> } };
+
+                /**
+                 * Property used internally by the exposeFunction method.
+                 */
+                errors: { [key: string]: { name?: string, args?: unknown[], value?: Awaited<unknown> } };
+            }
         };
+    }
+
+    interface Window {
+        '$cdp.callback.invoke'?: (payload: string) => void;
     }
 }
 
@@ -354,7 +352,7 @@ export class Session extends EventEmitter<Events> {
             this.customizeSuperJSON = customizeSuperJSON;
         }
 
-        const source = `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); globalThis.__cdp_superJSON = SuperJSON.default;`;
+        const source = `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;`;
         try {
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
@@ -452,7 +450,7 @@ export class Session extends EventEmitter<Events> {
         this.customizeSuperJSON = customizeSuperJSON;
 
         let promises = [];
-        const expression = `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.__cdp_superJSON);`;
+        const expression = `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.$cdp.superJSON);`;
         for (const frame of this.#webContents.mainFrame.framesInSubtree) {
             promises.push(frame.executeJavaScript(expression));
         }
@@ -501,74 +499,93 @@ export class Session extends EventEmitter<Events> {
      */
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
         const attachFunction = (name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
+            // @ts-expect-error
+            globalThis.$cdp ??= { callback: {} };
+
+            globalThis.$cdp.callback ??= { sequence: BigInt(0), returnValues: {}, errors: {} };
+
             const mode = options?.mode ?? 'Electron';
             if (frameId) {
-                if (globalThis.__cdp_frameId === undefined) {
-                    globalThis.__cdp_frameId = Promise.resolve(frameId);
-                } else if (globalThis.__cdp_frameIdResolve) {
-                    globalThis.__cdp_frameIdResolve(frameId);
+                if (globalThis.$cdp.frameId === undefined) {
+                    globalThis.$cdp.frameId = Promise.resolve(frameId);
+                } else if (globalThis.$cdp.frameIdResolve) {
+                    globalThis.$cdp.frameIdResolve(frameId);
+                    delete globalThis.$cdp.frameIdResolve;
                 }
             }
+
             if (mode === 'Electron') {
-                globalThis.__cdp_callback = (payload, sessionId, frameId) => {
-                    if (globalThis.__cdp_frameId === undefined) {
+                globalThis.$cdp.callback.invoke = (payload, sessionId, frameId) => {
+                    if (globalThis.$cdp.frameId === undefined) {
                         const { promise, resolve } = Promise.withResolvers<FrameId>();
-                        globalThis.__cdp_frameId = promise;
-                        globalThis.__cdp_frameIdResolve = resolve;
+                        globalThis.$cdp.frameId = promise;
+                        globalThis.$cdp.frameIdResolve = resolve;
                     }
                     if (frameId) {
                         console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload }));
                     } else {
-                        globalThis.__cdp_frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload })));
+                        globalThis.$cdp.frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload })));
                     }
                 }
             }
 
-            // @ts-expect-error : globalThis[name]
-            globalThis[name] = (...args: unknown[]) => {
-                if (globalThis.__cdp === undefined) {
-                    globalThis.__cdp = {
-                        callSequence: BigInt(0),
-                        returnValues: {},
-                        returnErrors: {}
-                    };
+            let global: Record<string, unknown> = globalThis;
+            let lastName = name;
+            if (name.includes('.')) {
+                let scope: Record<string, unknown> = global;
+                const parts = name.split('.');
+                for (let i = 0, part = parts[i]; i < parts.length - 1; part = parts[++i]) {
+                    if (!(part in scope) || typeof scope[part] !== "object" || scope[part] === null) {
+                        scope[part] = {};
+                    }
+                    scope = scope[part] as Record<string, unknown>;
+                }
+                global = scope;
+                lastName = parts[parts.length - 1];
+            }
+
+            global[lastName] = (...args: unknown[]) => {
+                const sequence = `${globalThis.$cdp.callback.sequence++}-${Math.random()}`;
+                globalThis.$cdp.callback.returnValues[sequence] = { name, args };
+                globalThis.$cdp.callback.errors[sequence] = { name, args };
+
+                const invoke = () => {
+                    if (globalThis.$cdp.callback.invoke) {
+                        globalThis.$cdp.callback.invoke(globalThis.$cdp.superJSON.stringify({ sequence, name, args }), sessionId, frameId);
+                    } else if (window['$cdp.callback.invoke']) {
+                        window['$cdp.callback.invoke'](globalThis.$cdp.superJSON.stringify({ sequence, name, args }));
+                    } else {
+                        throw new Error('CDP callback invocation failed: handler not found.');
+                    }
                 }
 
-                const cdp = globalThis.__cdp;
-                const callSequence = `${cdp.callSequence++}-${Math.random()}`;
-                cdp.returnValues[callSequence] = { name, args };
-                cdp.returnErrors[callSequence] = { name, args };
-
-                if (mode === 'Electron') {
-                    globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }), sessionId, frameId);
-                } else {
-                    globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
-                }
+                invoke();
 
                 const { promise, resolve, reject } = Promise.withResolvers();
 
                 if (options?.retry) {
                     const retry = options?.retry === true ? { delay: 1 } : options?.retry;
                     const retryIntervalId = setInterval(() => {
-                        if (cdp.returnValues[callSequence].init) {
+                        if (globalThis.$cdp.callback.returnValues?.[sequence].init) {
                             return;
                         }
                         if ((retry.count !== undefined) && retry.count-- < 0) {
                             console.warn('Failed after maximum retry attempts.');
                             return;
                         }
-                        if (mode === 'Electron') {
-                            globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }), sessionId, frameId);
-                        } else {
-                            globalThis.__cdp_callback(globalThis.__cdp_superJSON.stringify({ callSequence, name, args }));
+                        try {
+                            invoke();
+                        } catch (error) {
+                            console.debug(error);
+                            reject(error);
                         }
                     }, retry.delay ?? 1);
                     promise.finally(() => clearInterval(retryIntervalId));
                 }
 
                 if (!options?.withReturnValue) {
-                    delete cdp.returnValues[callSequence];
-                    delete cdp.returnErrors[callSequence];
+                    delete globalThis.$cdp.callback.returnValues[sequence];
+                    delete globalThis.$cdp.callback.errors[sequence];
                     return;
                 }
 
@@ -576,11 +593,11 @@ export class Session extends EventEmitter<Events> {
 
                 const resultIntervalId = setInterval(() => {
                     try {
-                        if (cdp.returnValues && callSequence in cdp.returnValues && 'value' in cdp.returnValues[callSequence]) {
-                            resolve(cdp.returnValues[callSequence].value);
+                        if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues && 'value' in globalThis.$cdp.callback.returnValues[sequence]) {
+                            resolve(globalThis.$cdp.callback.returnValues[sequence].value);
                         }
-                        if (cdp.returnErrors && callSequence in cdp.returnErrors && 'value' in cdp.returnErrors[callSequence]) {
-                            reject(cdp.returnErrors[callSequence].value as Error);
+                        if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors && 'value' in globalThis.$cdp.callback.errors[sequence]) {
+                            reject(globalThis.$cdp.callback.errors[sequence].value as Error);
                         }
                     } catch (error) {
                         reject(error as Error);
@@ -588,11 +605,11 @@ export class Session extends EventEmitter<Events> {
                 }, withReturnValue.delay ?? 1);
                 promise.finally(() => {
                     clearInterval(resultIntervalId);
-                    if (cdp.returnValues && callSequence in cdp.returnValues) {
-                        delete cdp.returnValues[callSequence];
+                    if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues) {
+                        delete globalThis.$cdp.callback.returnValues[sequence];
                     }
-                    if (cdp.returnErrors && callSequence in cdp.returnErrors) {
-                        delete cdp.returnErrors[callSequence];
+                    if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors) {
+                        delete globalThis.$cdp.callback.errors[sequence];
                     }
                 });
                 if (withReturnValue.timeout !== undefined) {
@@ -604,7 +621,7 @@ export class Session extends EventEmitter<Events> {
             };
         }
 
-        type Payload = { options?: EvaluateOptions, callSequence: string, name: string, args: A };
+        type Payload = { options?: EvaluateOptions, sequence: string, name: string, args: A };
 
         const processBindingCall = async (executionContextId: number, payload: Payload) => {
             if (!this.#executionContexts.has(executionContextId)) {
@@ -622,28 +639,28 @@ export class Session extends EventEmitter<Events> {
             try {
                 if (options?.retry) {
                     await context.evaluate({ timeout }, (seq) => {
-                        if (globalThis.__cdp?.returnValues && seq in globalThis.__cdp.returnValues) {
-                            globalThis.__cdp.returnValues[seq].init = true;
+                        if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                            globalThis.$cdp.callback.returnValues[seq].init = true;
                         }
-                    }, payload.callSequence);
+                    }, payload.sequence);
                 }
                 const ret = await fn(...payload.args);
 
                 if (withReturnValue) {
                     await context.evaluate({ timeout }, (seq, ret) => {
-                        if (globalThis.__cdp?.returnValues && seq in globalThis.__cdp.returnValues) {
-                            globalThis.__cdp.returnValues[seq].value = ret;
+                        if (globalThis.$cdp?.callback?.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                            globalThis.$cdp.callback.returnValues[seq].value = ret;
                         }
-                    }, payload.callSequence, ret);
+                    }, payload.sequence, ret);
                 }
             } catch (error) {
                 if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                     if (withReturnValue) {
                         await context.evaluate({ timeout }, (seq, error) => {
-                            if (globalThis.__cdp?.returnErrors && seq in globalThis.__cdp.returnErrors) {
-                                globalThis.__cdp.returnErrors[seq].value = error;
+                            if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
+                                globalThis.$cdp.callback.errors[seq].value = error;
                             }
-                        }, payload.callSequence, error);
+                        }, payload.sequence, error);
                     }
                 }
             }
@@ -653,7 +670,7 @@ export class Session extends EventEmitter<Events> {
 
         const bindingCalled = (event: Protocol.Runtime.BindingCalledEvent) => {
             try {
-                if (event.name === '__cdp_callback') {
+                if (event.name === '$cdp.callback.invoke') {
                     const payload: Payload = this.superJSON.parse(event.payload);
                     if (payload.name === name) {
                         processBindingCall(event.executionContextId, payload);
@@ -693,10 +710,10 @@ export class Session extends EventEmitter<Events> {
                                     setTimeout(reject, timeout);
                                 }
                                 await Promise.race([frame.evaluate(seq => {
-                                    if (globalThis.__cdp?.returnValues && seq in globalThis.__cdp.returnValues) {
-                                        globalThis.__cdp.returnValues[seq].init = true;
+                                    if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                                        globalThis.$cdp.callback.returnValues[seq].init = true;
                                     }
-                                }, payload.callSequence), promise]);
+                                }, payload.sequence), promise]);
                                 resolve();
                             }
                             const ret = await fn(...payload.args);
@@ -707,10 +724,10 @@ export class Session extends EventEmitter<Events> {
                                     setTimeout(reject, timeout);
                                 }
                                 await Promise.race([frame.evaluate((seq, ret) => {
-                                    if (globalThis.__cdp?.returnValues && seq in globalThis.__cdp.returnValues) {
-                                        globalThis.__cdp.returnValues[seq].value = ret;
+                                    if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                                        globalThis.$cdp.callback.returnValues[seq].value = ret;
                                     }
-                                }, payload.callSequence, ret), promise]);
+                                }, payload.sequence, ret), promise]);
                                 resolve();
                             }
                         } catch (error) {
@@ -720,10 +737,10 @@ export class Session extends EventEmitter<Events> {
                                     setTimeout(reject, timeout);
                                 }
                                 await Promise.race([frame.evaluate((seq, error) => {
-                                    if (globalThis.__cdp?.returnErrors && seq in globalThis.__cdp.returnErrors) {
-                                        globalThis.__cdp.returnErrors[seq].value = error;
+                                    if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
+                                        globalThis.$cdp.callback.errors[seq].value = error;
                                     }
-                                }, payload.callSequence, error), promise]);
+                                }, payload.sequence, error), promise]);
                                 resolve();
                             }
                         }
@@ -733,7 +750,7 @@ export class Session extends EventEmitter<Events> {
         };
 
         if (mode === 'CDP') {
-            await this.send('Runtime.addBinding', { name: '__cdp_callback' });
+            await this.send('Runtime.addBinding', { name: '$cdp.callback.invoke' });
             this.on('Runtime.bindingCalled', bindingCalled);
         } else {
             this.#webContents.on('console-message', onConsoleMessage);
