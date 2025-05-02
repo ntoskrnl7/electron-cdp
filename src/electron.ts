@@ -86,8 +86,21 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
             }`
     });
 
-    const applyFrameId = async (frame: WebFrameMain | undefined | null) => {
-        if (frame) {
+    const evaluate = async function <A0, A extends unknown[], R>(this: WebFrameMain, userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> {
+        try {
+            if (typeof userGestureOrFn === 'boolean') {
+                return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
+            } else {
+                return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
+            }
+        } catch (error) {
+            throw session.superJSON.parse(error as string);
+        }
+    };
+
+    const initializeFrame = async (frame: WebFrameMain | undefined | null) => {
+        if (frame && !frame.isDestroyed()) {
+            frame.evaluate = evaluate;
             await frame.executeJavaScript(`
                 if (globalThis.__cdp_frameIdResolve) {
                     globalThis.__cdp_frameIdResolve('${frame.processId}-${frame.routingId}');
@@ -97,31 +110,12 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
         }
     };
 
-    target.mainFrame.evaluate = async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
-        if (typeof userGestureOrFn === 'boolean') {
-            return session.superJSON.parse(await (target.mainFrame.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
-        } else {
-            return session.superJSON.parse(await (target.mainFrame.executeJavaScript(generateScriptString({ session }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
-        }
-    };
-    applyFrameId(target.mainFrame);
+    initializeFrame(target.mainFrame);
 
     target
-        .on('frame-created', async (_, details) => {
-            if (details.frame) {
-                const frame = details.frame;
-                frame.evaluate = async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
-                    if (typeof userGestureOrFn === 'boolean') {
-                        return session.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
-                    } else {
-                        return session.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
-                    }
-                };
-                applyFrameId(frame);
-            }
-        })
-        .on('will-frame-navigate', details => applyFrameId(details.frame))
-        .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => applyFrameId(webFrameMain.fromId(frameProcessId, frameRoutingId)));
+        .on('frame-created', async (_, details) => initializeFrame(details.frame))
+        .on('will-frame-navigate', details => initializeFrame(details.frame))
+        .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => initializeFrame(webFrameMain.fromId(frameProcessId, frameRoutingId)));
 
     return session;
 }

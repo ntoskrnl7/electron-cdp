@@ -29,33 +29,41 @@ function getWebFrameFromFrameId(frameId: FrameId) {
 
 declare global {
     namespace globalThis {
+        // eslint-disable-next-line no-var
         var __cdp_frameId: Promise<FrameId>;
+
+        // eslint-disable-next-line no-var
         var __cdp_frameIdResolve: (id: FrameId) => void;
 
         /**
           * SuperJSON.
           */
+        // eslint-disable-next-line no-var
         var __cdp_superJSON: SuperJSON;
 
         /**
          * Method used internally by the exposeFunction method.
          */
+        // eslint-disable-next-line no-var
         var __cdp_callback: (payload: string, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => void;
 
         var __cdp: {
             /**
              * Callback invocation sequence.
              */
+            // eslint-disable-next-line no-var
             callSequence: bigint;
 
             /**
              * Property used internally by the exposeFunction method.
              */
+            // eslint-disable-next-line no-var
             returnValues: { [key: string]: { name?: string, args?: unknown[], init?: true, value?: Awaited<unknown> } };
 
             /**
              * Property used internally by the exposeFunction method.
              */
+            // eslint-disable-next-line no-var
             returnErrors: { [key: string]: { name?: string, args?: unknown[], value?: Awaited<unknown> } };
         };
     }
@@ -350,6 +358,7 @@ export class Session extends EventEmitter<Events> {
         try {
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
+            console.error('[Session.enableSuperJSON] Failed to inject code :', error);
             this.#webContents.on('frame-created', (_, details) => details.frame?.executeJavaScript(source).catch(console.error));
             for (const frame of this.#webContents.mainFrame.framesInSubtree) {
                 frame.executeJavaScript(source).catch(console.error);
@@ -744,6 +753,7 @@ export class Session extends EventEmitter<Events> {
                 removeHandler
             };
         } catch (error) {
+            console.debug('[attachFunction] Failed to inject code :', error);
             if (mode === 'CDP') {
                 const executionContextCreated = async (context: ExecutionContext) => {
                     try {
@@ -760,7 +770,7 @@ export class Session extends EventEmitter<Events> {
                     removeHandler
                 };
             } else {
-                const frameCreated = async (event: Electron.Event, details: Electron.FrameCreatedDetails) => {
+                const frameCreated = async (_: Electron.Event, details: Electron.FrameCreatedDetails) => {
                     try {
                         details.frame?.evaluate(attachFunction, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
                     } catch (error) {
@@ -814,7 +824,9 @@ export class Session extends EventEmitter<Events> {
         if (entry) {
             this.#exposeFunctions.delete(name);
             await this.#removeExposedFunction(name, entry);
+            return true;
         }
+        return false;
     }
 
     /**

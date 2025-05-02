@@ -63,7 +63,11 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
             const fn = ${fn.toString()};
             const args = globalThis.__cdp_superJSON.parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(argsPacked) : SuperJSON.stringify(argsPacked))});
             ${argsCode}
-            const result = await fn(...args);
-            return globalThis.__cdp_superJSON.stringify(result);
+            try {
+                const result = await fn(...args);
+                return globalThis.__cdp_superJSON.stringify(result);
+            } catch (error) {
+                throw globalThis.__cdp_superJSON.stringify(error);
+            }
         })();`
 }
