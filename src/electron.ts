@@ -95,7 +95,15 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
                 return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
             }
         } catch (error) {
-            throw session.superJSON.parse(error as string);
+            if (typeof error === 'string') {
+                try {
+                    throw session.superJSON.parse(error);
+                } catch {
+                    throw error;
+                }
+            } else {
+                throw error;
+            }
         }
     };
 
