@@ -60,7 +60,7 @@ function makeSerializableI(obj: object | null, current: number, depth: number) {
     if (current > depth) {
         try {
             return JSON.parse(JSON.stringify(obj));
-        } catch (error) {
+        } catch {
             return null;
         }
     }

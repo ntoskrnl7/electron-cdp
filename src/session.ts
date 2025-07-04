@@ -28,6 +28,7 @@ function getWebFrameFromFrameId(frameId: FrameId) {
 }
 
 declare global {
+    // eslint-disable-next-line @typescript-eslint/no-namespace
     namespace globalThis {
         // eslint-disable-next-line no-var
         var $cdp: {
@@ -160,7 +161,7 @@ export interface ExposeFunctionOptions {
 
 export type CustomizeSuperJSONFunction = (superJSON: SuperJSON) => void;
 
-type XOR<T extends any[]> = T extends [infer T1, infer T2]
+type XOR<T extends unknown[]> = T extends [infer T1, infer T2]
     ? XOR_<T1, T2>
     : T extends [infer T1, infer T2, ...infer Rest]
     ? XOR_<T1, XOR<[T2, ...Rest]>>
@@ -449,7 +450,7 @@ export class Session extends EventEmitter<Events> {
 
         this.customizeSuperJSON = customizeSuperJSON;
 
-        let promises = [];
+        const promises = [];
         const expression = `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.$cdp.superJSON);`;
         for (const frame of this.#webContents.mainFrame.framesInSubtree) {
             promises.push(frame.executeJavaScript(expression));
@@ -499,7 +500,7 @@ export class Session extends EventEmitter<Events> {
      */
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
         const attachFunction = (name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
-            // @ts-expect-error
+            // @ts-expect-error : ignore
             globalThis.$cdp ??= { callback: {} };
 
             globalThis.$cdp.callback ??= { sequence: BigInt(0), returnValues: {}, errors: {} };
@@ -688,15 +689,13 @@ export class Session extends EventEmitter<Events> {
                 const { sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length));
                 const frame = frameId ? getWebFrameFromFrameId(frameId) ?? details.frame : details.frame;
 
-                if (frame.evaluate === undefined) {
-                    frame.evaluate = async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
-                        if (typeof userGestureOrFn === 'boolean') {
-                            return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
-                        } else {
-                            return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
-                        }
-                    };
-                }
+                frame.evaluate ??= async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
+                    if (typeof userGestureOrFn === 'boolean') {
+                        return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
+                    } else {
+                        return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
+                    }
+                };
 
                 if (sessionId === this.id) {
                     const payload: Payload = this.superJSON.parse(payloadString);
@@ -805,7 +804,7 @@ export class Session extends EventEmitter<Events> {
         }
         this.#exposeFunctions.set(name, entry);
 
-        let promises = [];
+        const promises = [];
 
         for (const frame of this.#webContents.mainFrame.framesInSubtree) {
             promises.push(frame.evaluate(attachFunction, name, options, this.id, `${frame.processId}-${frame.routingId}`).catch(console.debug));

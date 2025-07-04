@@ -1,6 +1,5 @@
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { EvaluateOptions, Session } from ".";
-import { readFileSync } from 'fs';
 import { generateScriptString } from './utils';
 
 function convertExceptionDetailsToError(exceptionDetails: Protocol.Runtime.ExceptionDetails) {
@@ -9,11 +8,33 @@ function convertExceptionDetailsToError(exceptionDetails: Protocol.Runtime.Excep
         if (exceptionDetails.exception.preview) {
             exceptionDetails.exception.preview.properties.forEach(prop => {
                 switch (prop.type) {
+                    case 'bigint':
+                        if (prop.value) {
+                            try {
+                                error[prop.name] = BigInt(prop.value);
+                            } catch {
+                            }
+                        }
+                        break;
                     case 'number':
                         error[prop.name] = Number(prop.value);
                         break;
                     case 'string':
                         error[prop.name] = prop.value;
+                        break;
+                    case 'undefined':
+                        error[prop.name] = undefined;
+                        break;
+                    case 'boolean':
+                    case 'object':
+                        if (prop.value) {
+                            try {
+                                error[prop.name] = JSON.parse(prop.value);
+                            } catch {
+                            }
+                        }
+                        break;
+                    default:
                         break;
                 }
             });
@@ -129,6 +150,6 @@ export class ExecutionContext {
             throw convertExceptionDetailsToError(res.exceptionDetails);
         }
 
-        return res.result?.value === undefined ? undefined as T : this.session.superJSON.parse<any>(res.result.value);
+        return res.result?.value === undefined ? undefined as T : this.session.superJSON.parse(res.result.value);
     }
 }

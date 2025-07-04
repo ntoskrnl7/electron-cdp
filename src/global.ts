@@ -2,7 +2,7 @@ declare global {
     interface PromiseWithResolvers<T> {
         promise: Promise<T>;
         resolve: (value: T | PromiseLike<T>) => void;
-        reject: (reason?: any) => void;
+        reject: (reason?: unknown) => void;
     }
 
     interface PromiseConstructor {
@@ -18,25 +18,25 @@ declare global {
     }
 }
 
-export function applyGlobal() {
-    if (!('withResolvers' in Promise)) {
-        try {
-            Object.defineProperty(Promise, 'withResolvers', {
-                value: function <T>() {
-                    let resolve: (value: T | PromiseLike<T>) => void;
-                    let reject: (reason?: any) => void;
-                    const promise = new Promise<T>((res, rej) => {
-                        resolve = res;
-                        reject = rej;
-                    });
-                    return {
-                        promise,
-                        resolve: resolve!,
-                        reject: reject!,
-                    };
-                }
+export function applyPolyfill() {
+    if (!Promise.withResolvers) {
+        const value = <T>() => {
+            let resolve: ReturnType<typeof Promise.withResolvers<T>>['resolve'];
+            let reject: ReturnType<typeof Promise.withResolvers<T>>['reject'];
+            const promise = new Promise<T>((res, rej) => {
+                resolve = res;
+                reject = rej;
             });
-        } catch (error) {
+            return {
+                promise,
+                resolve: resolve!,
+                reject: reject!,
+            };
+        }
+        try {
+            Object.defineProperty(Promise, 'withResolvers', { value, configurable: true });
+        } catch {
+            Promise.withResolvers = value;
         }
     };
 }

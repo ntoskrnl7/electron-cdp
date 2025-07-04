@@ -3,6 +3,7 @@ import { WebContents, WebFrameMain, webFrameMain } from 'electron';
 import { Session as CDPSession, generateScriptString, SuperJSON } from '.';
 
 declare global {
+    // eslint-disable-next-line @typescript-eslint/no-namespace
     namespace Electron {
         interface WebContents {
             /**
@@ -92,15 +93,11 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
             if (typeof userGestureOrFn === 'boolean') {
                 return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
             } else {
-                return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, userGestureOrFn, ...[fnOrArg0 as A0, ...args]))) as string);
+                return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
             }
         } catch (error) {
             if (typeof error === 'string') {
-                try {
-                    throw session.superJSON.parse(error);
-                } catch {
-                    throw error;
-                }
+                throw session.superJSON.parse(error);
             } else {
                 throw error;
             }

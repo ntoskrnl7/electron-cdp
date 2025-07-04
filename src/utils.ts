@@ -1,12 +1,11 @@
 import { readFileSync } from "fs";
-import { applyGlobal } from "./global";
+import { applyPolyfill } from "./global";
 import { Session } from "./session";
 import { SuperJSON } from ".";
 
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
 
 export function generateScriptString<T, A extends unknown[]>(options: ({ session?: Session, timeout?: number; }) | undefined, fn: (...args: A) => T, ...args: A) {
-
     const argsPacked = args.map(arg => (typeof arg === 'function' ? arg.toString() : arg));
     const argsCode = argsPacked.map((arg, index) => {
         if (typeof arg === 'string' && arg.startsWith('function')) {
@@ -60,7 +59,7 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
         `)
         +
         `
-            ;;(${applyGlobal.toString()})();;
+            ;;(${applyPolyfill.toString()})();;
             const fn = ${fn.toString()};
             const args = globalThis.$cdp.superJSON.parse(${JSON.stringify(options?.session ? options.session.superJSON.stringify(argsPacked) : SuperJSON.stringify(argsPacked))});
             ${argsCode}
