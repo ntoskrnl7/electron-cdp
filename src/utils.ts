@@ -13,8 +13,9 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
         }
         return '';
     }).join(';\n');
-    return (options?.session?.webContents.hasSuperJSON ? `
-        (async () => {
+    return '(async () => {' +
+        (options?.session?.webContents.hasSuperJSON ?
+            `
             globalThis.$cdp ??= {};
             if (globalThis.$cdp.superJSON === undefined) {
                 try {
@@ -52,11 +53,14 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
                     throw new Error('Critical Error: SuperJSON library is missing. The application cannot proceed without it. : (fn : "` + fn.name + `", executionContextId : ' + globalThis._executionContextId + ')');
                 }
             }`
-        :
-        `
-        ${SuperJSONScript}; (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;
-        (async () => {
-        `)
+
+            :
+
+            `
+            ${SuperJSONScript};
+            (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;
+            `
+        )
         +
         `
             ;;(${applyPolyfill.toString()})();;

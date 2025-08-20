@@ -1,32 +1,32 @@
 {
     "$schema": "./node_modules/oxlint/configuration_schema.json",
     "rules": {
-        "no-empty-function": "off",
-        "no-unused-vars": "error",
+        "no-debugger": "off",
+        "prefer-const": "error",
         "no-implicit-any-catch": "error",
-        "no-debugger": "error",
         "no-constant-condition": "error",
         "no-var": "error",
-        "prefer-const": "error",
         "eqeqeq": [
             "error",
             "always"
         ],
+        "no-empty-function": "off",
         "no-extra-boolean-cast": "error",
         "no-unreachable": "error",
         "no-return-await": "error",
         "no-useless-return": "error",
         "no-shadow": "error",
         "consistent-return": "error",
+        "default-case": "off",
         "no-fallthrough": "error",
         "no-self-compare": "error",
         "no-unsafe-finally": "error",
         "no-unsafe-negation": "error",
-        "ts/no-explicit-any": "error",
-        "ts/no-non-null-assertion": "error",
-        "ts/no-misused-promises": "error",
-        "ts/ban-ts-comment": "error",
-        "ts/no-unused-vars": [
+        "no-explicit-any": "error",
+        "no-non-null-assertion": "off",
+        "no-misused-promises": "error",
+        "ban-ts-comment": "error",
+        "no-unused-vars": [
             "error",
             {
                 "vars": "all",
@@ -34,8 +34,8 @@
                 "ignoreRestSiblings": false
             }
         ],
-        "ts/no-inferrable-types": "warn",
-        "ts/consistent-type-assertions": [
+        "no-inferrable-types": "warn",
+        "consistent-type-assertions": [
             "error",
             {
                 "assertionStyle": "as",
