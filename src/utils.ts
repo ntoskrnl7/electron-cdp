@@ -4,15 +4,14 @@ import { Session } from "./session";
 import { SuperJSON } from ".";
 
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
+const FunctionSignature = '_$cdp_fn$_';
 
 export function generateScriptString<T, A extends unknown[]>(options: ({ session?: Session, timeout?: number; }) | undefined, fn: (...args: A) => T, ...args: A) {
-    const argsPacked = args.map(arg => (typeof arg === 'function' ? arg.toString() : arg));
-    const argsCode = argsPacked.map((arg, index) => {
-        if (typeof arg === 'string' && arg.startsWith('function')) {
-            return `args[${index}] = ${arg.toString()};`;
-        }
-        return '';
-    }).join(';\n');
+    const argsPacked = args.map(arg => (typeof arg === 'function' ? FunctionSignature + arg.toString() : arg));
+    const argsCode = argsPacked
+        .map((arg, index) =>
+            (typeof arg === 'string' && arg.trim().startsWith(FunctionSignature)) ? `args[${index}] = ${arg.substring(FunctionSignature.length).toString()};` : '')
+        .join(';\n');
     return '(async () => {' +
         (options?.session?.webContents.hasSuperJSON ?
             `
