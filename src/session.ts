@@ -1,11 +1,13 @@
 import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
-import Electron, { Debugger, WebContents, webFrameMain } from 'electron';
+import Electron, { WebContents, webFrameMain } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
 import { readFileSync } from 'fs';
 import { registerTypes } from './superJSON';
+
+declare const globalThis: GlobalThis;
 
 const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
 
@@ -20,58 +22,25 @@ function convertToFunction(code: string) {
     return `function ${trimmedCode}`;
 }
 
-type FrameId = `${number}-${number}`;
+/**
+ * Stable identifier for an Electron frame composed as `${processId}-${routingId}`.
+ * Example: "1234-7"
+ */
+export type FrameId = `${number}-${number}`;
 
 function getWebFrameFromFrameId(frameId: FrameId) {
     const [processId, routingId] = frameId.split('-').map(v => Number(v))
     return webFrameMain.fromId(processId, routingId);
 }
 
-declare global {
-    // eslint-disable-next-line @typescript-eslint/no-namespace
-    namespace globalThis {
-        // eslint-disable-next-line no-var
-        var $cdp: {
-
-            frameId?: Promise<FrameId>;
-
-            frameIdResolve?: (id: FrameId) => void;
-
-            /**
-             * SuperJSON.
-             */
-            superJSON: SuperJSON;
-
-            callback: {
-                invoke?: (payload: string, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => void;
-
-                /**
-                 * Callback invocation sequence.
-                 */
-                sequence: bigint;
-
-                /**
-                 * Property used internally by the exposeFunction method.
-                 */
-                returnValues: { [key: string]: { name?: string, args?: unknown[], init?: true, value?: Awaited<unknown> } };
-
-                /**
-                 * Property used internally by the exposeFunction method.
-                 */
-                errors: { [key: string]: { name?: string, args?: unknown[], value?: Awaited<unknown> } };
-            }
-        };
-    }
-
-    interface Window {
-        '$cdp.callback.invoke'?: (payload: string) => void;
-    }
-}
-
 /**
  * Options for sending commands.
  */
 export declare interface CommandOptions {
+    /** 
+     * Maximum time in milliseconds to wait for the CDP command to complete.
+     * Default: Infinity
+     */
     timeout: number;
 }
 
@@ -182,11 +151,11 @@ type ExposeFunction =
 export class Session extends EventEmitter<Events> {
 
     readonly id?: Protocol.Target.SessionID;
+    readonly webContents: WebContents;
+
     #superJSON: SuperJSON;
     #customizeSuperJSON: CustomizeSuperJSONFunction = () => { };
 
-    #webContents: WebContents;
-    readonly #debugger: Debugger;
     readonly #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
 
     readonly #exposeFunctions: Map<string, ExposeFunction> = new Map();
@@ -207,7 +176,7 @@ export class Session extends EventEmitter<Events> {
      * @param args - The arguments to pass to the function.
      * @returns A promise that resolves with the result of the function.
      */
-    evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
+    evaluate<A extends unknown[], R>(fn: (...args: A) => R, ...args: A): Promise<R>;
 
     /**
      * Evaluates the provided function with additional options and the given arguments in the context of the current page.
@@ -217,7 +186,7 @@ export class Session extends EventEmitter<Events> {
      * @param args - The arguments to pass to the function.
      * @returns A promise that resolves with the result of the function.
      */
-    evaluate<T, A extends unknown[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
+    evaluate<A extends unknown[], R>(options: EvaluateOptions, fn: (...args: A) => R, ...args: A): Promise<R>;
 
     /**
      * Exposes a function to the browser's global context under the specified name.
@@ -227,7 +196,7 @@ export class Session extends EventEmitter<Events> {
      * @param options - Optional settings for exposing the function.
      * @returns A promise that resolves when the function is successfully exposed.
      */
-    async evaluate<R, F extends (...args: ARGS) => R, ARG_0, ARGS_OTHER extends unknown[], ARGS extends [ARG_0, ...ARGS_OTHER]>(
+    async evaluate<F extends (...args: ARGS) => R, ARG_0, ARGS_OTHER extends unknown[], ARGS extends [ARG_0, ...ARGS_OTHER], R>(
         fnOrOptions: F | EvaluateOptions,
         fnOrArg0?: ARG_0 | F,
         ...args: ARGS_OTHER | ARGS
@@ -241,56 +210,82 @@ export class Session extends EventEmitter<Events> {
         throw new Error('invalid parameter');
     }
 
-    private fromSessionId(sessionId: Protocol.Target.SessionID) {
-        return new Session(this.#webContents, sessionId);
+    /**
+     * Attaches to a specific DevTools Protocol target and returns a Session
+     * scoped to that target's dedicated CDP session.
+     *
+     * Internally calls `Target.attachToTarget({ targetId, flatten: true })`
+     * and uses the returned `sessionId`.
+     *
+     * @param webContents - The WebContents used to issue the CDP command.
+     * @param targetId - Target ID of the page/iframe/worker/etc. to attach to.
+     * @returns A `Session` bound to the attached target's session.
+     */
+    static async fromTargetId(webContents: WebContents, targetId: Protocol.Target.TargetID) {
+        const session = new Session(webContents);
+        const { sessionId } = await session.send('Target.attachToTarget', { targetId, flatten: true });
+        return new Session(webContents, sessionId);
     }
 
     /**
-     * Creates a new Session instance.
+     * Creates a new Session instance bound to a specific WebContents.
      *
-     * @param webContents - The web contents associated with this session.
-     * @param sessionId -
+     * @param webContents - The WebContents this session communicates with via CDP.
+     * @param sessionId - Optional DevTools Protocol session ID. If provided,
+     *                    only messages for this session are handled.
+     * @param trackExecutionContexts - Whether to track Runtime execution context
+     *                                 lifecycle events (created/destroyed/cleared)
+     *                                 and expose them as ExecutionContext objects.
      */
-    constructor(webContents: WebContents, sessionId?: Protocol.Target.SessionID) {
+    constructor(webContents: WebContents, sessionId?: Protocol.Target.SessionID, trackExecutionContexts = false) {
         super();
         this.id = sessionId;
         this.#superJSON = new SuperJSON();
         registerTypes(this.#superJSON);
 
-        this.#webContents = webContents;
-        this.#debugger = webContents.debugger;
-        this.#debugger.on('message', (_, method, params, sessionId) => {
-            if (this.id === undefined && sessionId !== '') {
+        this.webContents = webContents;
+
+        if (!webContents.debugger.isAttached()) {
+            webContents.debugger.attach();
+        }
+
+        webContents.debugger.on('message', (_, method, params, sessionId) => {
+            if (this.id === undefined && sessionId) {
                 return;
             }
             if (this.id && this.id !== sessionId) {
                 return;
             }
             this.emit(method as keyof ProtocolMapping.Events, params, sessionId || undefined);
-            switch (method) {
-                case 'Runtime.executionContextCreated': {
-                    const event = params as Protocol.Runtime.ExecutionContextCreatedEvent;
-                    const ctx = new ExecutionContext(sessionId ? this.fromSessionId(sessionId) : this, event.context);
-                    this.#executionContexts.set(event.context.id, ctx);
-                    this.emit('execution-context-created', ctx);
-                    break;
+
+            if (trackExecutionContexts) {
+                switch (method) {
+                    case 'Runtime.executionContextCreated': {
+                        const event = params as Protocol.Runtime.ExecutionContextCreatedEvent;
+                        const ctx = new ExecutionContext(this, event.context);
+                        this.#executionContexts.set(event.context.id, ctx);
+                        this.emit('execution-context-created', ctx);
+                        break;
+                    }
+                    case 'Runtime.executionContextDestroyed':
+                        this.emit('execution-context-destroyed', { ...params, sessionId });
+                        this.#executionContexts.delete((params as Protocol.Runtime.ExecutionContextDestroyedEvent).executionContextId);
+                        break;
+                    case 'Runtime.executionContextsCleared':
+                        this.#executionContexts.clear();
+                        break;
                 }
-                case 'Runtime.executionContextDestroyed':
-                    this.emit('execution-context-destroyed', { ...params, sessionId });
-                    this.#executionContexts.delete((params as Protocol.Runtime.ExecutionContextDestroyedEvent).executionContextId);
-                    break;
-                case 'Runtime.executionContextsCleared':
-                    this.#executionContexts.clear();
-                    break;
             }
         });
     }
 
     /**
+     * Registers `listener` as the only handler for `eventName` on this instance.
+     * Any existing listeners for the same event are removed first to prevent duplicates.
      *
-     * @param eventName
-     * @param listener
-     * @returns
+     * @param eventName - CDP event name (e.g., 'Runtime.consoleAPICalled').
+     * @param listener  - Listener function to attach.
+     * @returns This `Session` instance (for chaining).
      */
     setExclusiveListener<K>(eventName: keyof Events | K, listener: K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => void : never : never): this {
         return this.removeAllListeners(eventName).on(eventName, listener);
@@ -304,22 +299,11 @@ export class Session extends EventEmitter<Events> {
      * @param options - Options for sending the command.
      * @throws If the debugger is not attached.
      */
-    send<T extends keyof ProtocolMapping.Commands>(method: T, params?: ProtocolMapping.Commands[T]['paramsType'][0]): Promise<ProtocolMapping.Commands[T]['returnType']> {
-        if (!this.#debugger.isAttached()) {
+    async send<T extends keyof ProtocolMapping.Commands>(method: T, params?: ProtocolMapping.Commands[T]['paramsType'][0]): Promise<ProtocolMapping.Commands[T]['returnType']> {
+        if (!this.webContents.debugger.isAttached()) {
             throw new Error('not attached');
         }
-        return this.#debugger.sendCommand(method, params, this.id);
-    }
-
-    /**
-     * Attaches the debugger to the browser window.
-     *
-     * @param protocolVersion - The protocol version to use.
-     */
-    attach(protocolVersion?: string) {
-        if (!this.#debugger.isAttached()) {
-            this.#debugger.attach(protocolVersion);
-        }
+        return await this.webContents.debugger.sendCommand(method, params, this.id);
     }
 
     /**
@@ -342,7 +326,7 @@ export class Session extends EventEmitter<Events> {
      * will be logged to the console.
      */
     async enableSuperJSON(customizeSuperJSON?: CustomizeSuperJSONFunction) {
-        if (this.#webContents.hasSuperJSON) {
+        if (this.webContents.hasSuperJSON) {
             if (customizeSuperJSON) {
                 await this.configureSuperJSON(customizeSuperJSON);
             }
@@ -358,8 +342,8 @@ export class Session extends EventEmitter<Events> {
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
             console.error('[Session.enableSuperJSON] Failed to inject code :', error);
-            this.#webContents.on('frame-created', (_, details) => details.frame?.executeJavaScript(source).catch(console.error));
-            for (const frame of this.#webContents.mainFrame.framesInSubtree) {
+            this.webContents.on('frame-created', (_, details) => details.frame?.executeJavaScript(source).catch(console.error));
+            for (const frame of this.webContents.mainFrame.framesInSubtree) {
                 frame.executeJavaScript(source).catch(console.error);
             }
         }
@@ -378,7 +362,7 @@ export class Session extends EventEmitter<Events> {
         for (const contextId of this.#executionContexts.keys()) {
             this.send('Runtime.evaluate', { ...buildParams(), contextId }).catch(console.error);
         }
-        this.#webContents.hasSuperJSON = true;
+        this.webContents.hasSuperJSON = true;
     }
 
     /**
@@ -444,7 +428,7 @@ export class Session extends EventEmitter<Events> {
      * @throws Any errors that occur during the execution of the script will be logged to the console.
      */
     async configureSuperJSON(customizeSuperJSON: CustomizeSuperJSONFunction) {
-        if (!this.#webContents.hasSuperJSON) {
+        if (!this.webContents.hasSuperJSON) {
             return await this.enableSuperJSON(customizeSuperJSON);
         }
 
@@ -452,7 +436,7 @@ export class Session extends EventEmitter<Events> {
 
         const promises = [];
         const expression = `(${convertToFunction(this.#customizeSuperJSON.toString())})(globalThis.$cdp.superJSON);`;
-        for (const frame of this.#webContents.mainFrame.framesInSubtree) {
+        for (const frame of this.webContents.mainFrame.framesInSubtree) {
             promises.push(frame.executeJavaScript(expression));
         }
         promises.push(this.send('Runtime.evaluate', {
@@ -487,8 +471,12 @@ export class Session extends EventEmitter<Events> {
     /**
      * Detaches the debugger from the browser window.
      */
-    detach() {
-        this.#debugger.detach();
+    async detach() {
+        if (this.id) {
+            await this.webContents.debugger.sendCommand('Target.detachFromTarget', { sessionId: this.id });
+        } else if (this.webContents.debugger.isAttached()) {
+            this.webContents.debugger.detach();
+        }
     }
 
     /**
@@ -506,28 +494,45 @@ export class Session extends EventEmitter<Events> {
             globalThis.$cdp.callback ??= { sequence: BigInt(0), returnValues: {}, errors: {} };
 
             const mode = options?.mode ?? 'Electron';
-            if (frameId) {
-                if (globalThis.$cdp.frameId === undefined) {
-                    globalThis.$cdp.frameId = Promise.resolve(frameId);
-                } else if (globalThis.$cdp.frameIdResolve) {
-                    globalThis.$cdp.frameIdResolve(frameId);
-                    delete globalThis.$cdp.frameIdResolve;
+
+            if ('window' in globalThis && frameId) {
+                if (window.$cdp.frameId === undefined) {
+                    window.$cdp.frameId = Promise.resolve(frameId);
+                } else if (window.$cdp.frameIdResolve) {
+                    window.$cdp.frameIdResolve(frameId);
+                    delete window.$cdp.frameIdResolve;
                 }
             }
 
             if (mode === 'Electron') {
                 globalThis.$cdp.callback.invoke = (payload, sessionId, frameId) => {
-                    if (globalThis.$cdp.frameId === undefined) {
-                        const { promise, resolve } = Promise.withResolvers<FrameId>();
-                        globalThis.$cdp.frameId = promise;
-                        globalThis.$cdp.frameIdResolve = resolve;
-                    }
-                    if (frameId) {
-                        console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload }));
+                    let type: 'unknown' | 'window' | 'worker' | 'shared-worker' | 'service-worker';
+                    if (globalThis.DedicatedWorkerGlobalScope !== undefined) {
+                        type = 'worker';
+                    } else if (globalThis.SharedWorkerGlobalScope !== undefined) {
+                        type = 'shared-worker';
+                    } else if (globalThis.ServiceWorkerGlobalScope !== undefined) {
+                        type = 'service-worker';
+                    } else if (globalThis.Window !== undefined) {
+                        type = 'window';
                     } else {
-                        globalThis.$cdp.frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ frameId, sessionId, payload })));
+                        type = 'unknown'
                     }
-                }
+                    if (globalThis.Window) {
+                        if (window.$cdp.frameId === undefined) {
+                            const { promise, resolve } = Promise.withResolvers<FrameId>();
+                            window.$cdp.frameId = promise;
+                            window.$cdp.frameIdResolve = resolve;
+                        }
+                        if (frameId) {
+                            console.debug('cdp-utils-' + JSON.stringify({ type, frameId, sessionId, payload } as InvokeMessage));
+                        } else {
+                            window.$cdp.frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ type, frameId, sessionId, payload } as InvokeMessage)));
+                        }
+                    } else {
+                        console.debug('cdp-utils-' + JSON.stringify({ type, frameId, sessionId, payload } as InvokeMessage));
+                    }
+                };
             }
 
             let global: Record<string, unknown> = globalThis;
@@ -545,82 +550,85 @@ export class Session extends EventEmitter<Events> {
                 lastName = parts[parts.length - 1];
             }
 
-            global[lastName] = (...args: unknown[]) => {
-                const sequence = `${globalThis.$cdp.callback.sequence++}-${Math.random()}`;
-                globalThis.$cdp.callback.returnValues[sequence] = { name, args };
-                globalThis.$cdp.callback.errors[sequence] = { name, args };
+            if (!global[lastName]) {
+                global[lastName] = (...args: unknown[]) => {
+                    const sequence = `${globalThis.$cdp.callback.sequence++}-${Math.random()}`;
+                    globalThis.$cdp.callback.returnValues[sequence] = { name, args };
+                    globalThis.$cdp.callback.errors[sequence] = { name, args };
 
-                const invoke = () => {
-                    if (globalThis.$cdp.callback.invoke) {
-                        globalThis.$cdp.callback.invoke(globalThis.$cdp.superJSON.stringify({ sequence, name, args }), sessionId, frameId);
-                    } else if (window['$cdp.callback.invoke']) {
-                        window['$cdp.callback.invoke'](globalThis.$cdp.superJSON.stringify({ sequence, name, args }));
-                    } else {
-                        throw new Error('CDP callback invocation failed: handler not found.');
+                    const invoke = () => {
+                        if (mode === 'Electron' && globalThis.$cdp.callback.invoke) {
+                            globalThis.$cdp.callback.invoke(globalThis.$cdp.superJSON.stringify({ sequence, name, args }), sessionId, frameId);
+                        } else if (mode === 'CDP' && globalThis['$cdp.callback.invoke']) {
+                            globalThis['$cdp.callback.invoke'](globalThis.$cdp.superJSON.stringify({ sequence, name, args }));
+                        } else {
+                            throw new Error('CDP callback invocation failed: handler not found.');
+                        }
                     }
-                }
 
-                invoke();
+                    invoke();
 
-                const { promise, resolve, reject } = Promise.withResolvers();
+                    const { promise, resolve, reject } = Promise.withResolvers();
 
-                if (options?.retry) {
-                    const retry = options?.retry === true ? { delay: 1 } : options?.retry;
-                    const retryIntervalId = setInterval(() => {
-                        if (globalThis.$cdp.callback.returnValues?.[sequence].init) {
-                            return;
-                        }
-                        if ((retry.count !== undefined) && retry.count-- < 0) {
-                            console.warn('Failed after maximum retry attempts.');
-                            return;
-                        }
-                        try {
-                            invoke();
-                        } catch (error) {
-                            console.debug(error);
-                            reject(error);
-                        }
-                    }, retry.delay ?? 1);
-                    promise.finally(() => clearInterval(retryIntervalId));
-                }
-
-                if (!options?.withReturnValue) {
-                    delete globalThis.$cdp.callback.returnValues[sequence];
-                    delete globalThis.$cdp.callback.errors[sequence];
-                    return;
-                }
-
-                const withReturnValue = typeof options.withReturnValue === 'object' ? options.withReturnValue : {};
-
-                const resultIntervalId = setInterval(() => {
-                    try {
-                        if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues && 'value' in globalThis.$cdp.callback.returnValues[sequence]) {
-                            resolve(globalThis.$cdp.callback.returnValues[sequence].value);
-                        }
-                        if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors && 'value' in globalThis.$cdp.callback.errors[sequence]) {
-                            reject(globalThis.$cdp.callback.errors[sequence].value as Error);
-                        }
-                    } catch (error) {
-                        reject(error as Error);
+                    if (options?.retry) {
+                        const retry = options?.retry === true ? { delay: 1 } : options?.retry;
+                        const retryIntervalId = setInterval(() => {
+                            if (globalThis.$cdp.callback.returnValues?.[sequence].init) {
+                                return;
+                            }
+                            if ((retry.count !== undefined) && retry.count-- < 0) {
+                                console.warn('Failed after maximum retry attempts.');
+                                return;
+                            }
+                            try {
+                                invoke();
+                            } catch (error) {
+                                console.debug(error);
+                                reject(error);
+                            }
+                        }, retry.delay ?? 1);
+                        promise.finally(() => clearInterval(retryIntervalId));
                     }
-                }, withReturnValue.delay ?? 1);
-                promise.finally(() => {
-                    clearInterval(resultIntervalId);
-                    if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues) {
+
+                    if (!options?.withReturnValue) {
                         delete globalThis.$cdp.callback.returnValues[sequence];
-                    }
-                    if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors) {
                         delete globalThis.$cdp.callback.errors[sequence];
+                        return;
                     }
-                });
-                if (withReturnValue.timeout !== undefined) {
-                    const timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), withReturnValue.timeout);
-                    promise.finally(() => clearTimeout(timeoutId));
-                }
 
-                return promise;
-            };
-        }
+                    const withReturnValue = typeof options.withReturnValue === 'object' ? options.withReturnValue : {};
+
+                    const resultIntervalId = setInterval(() => {
+                        try {
+                            if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues && 'value' in globalThis.$cdp.callback.returnValues[sequence]) {
+                                resolve(globalThis.$cdp.callback.returnValues[sequence].value);
+                            }
+                            if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors && 'value' in globalThis.$cdp.callback.errors[sequence]) {
+                                reject(globalThis.$cdp.callback.errors[sequence].value as Error);
+                            }
+                        } catch (error) {
+                            reject(error as Error);
+                        }
+                    }, withReturnValue.delay ?? 1);
+                    promise.finally(() => {
+                        clearInterval(resultIntervalId);
+                        if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues) {
+                            delete globalThis.$cdp.callback.returnValues[sequence];
+                        }
+                        if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors) {
+                            delete globalThis.$cdp.callback.errors[sequence];
+                        }
+                    });
+                    if (withReturnValue.timeout !== undefined) {
+                        const timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), withReturnValue.timeout);
+                        promise.finally(() => clearTimeout(timeoutId));
+                    }
+
+                    return promise;
+                };
+                (global[lastName] as Function)['$mode'] = mode;
+            }
+        };
 
         type Payload = { options?: EvaluateOptions, sequence: string, name: string, args: A };
 
@@ -665,7 +673,7 @@ export class Session extends EventEmitter<Events> {
                     }
                 }
             }
-        }
+        };
 
         const mode = options?.mode ?? 'Electron';
 
@@ -686,7 +694,7 @@ export class Session extends EventEmitter<Events> {
 
         const onConsoleMessage = async (details: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
             if (details.level === 'debug' && details.message.startsWith('cdp-utils-')) {
-                const { sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length));
+                const { type, sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length)) as InvokeMessage;
                 const frame = frameId ? getWebFrameFromFrameId(frameId) ?? details.frame : details.frame;
 
                 frame.evaluate ??= async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
@@ -698,6 +706,7 @@ export class Session extends EventEmitter<Events> {
                 };
 
                 if (sessionId === this.id) {
+                    const target = ((type === 'worker' || type === 'service-worker' || type === 'shared-worker') ? new Session(this.webContents, sessionId) : frame);
                     const payload: Payload = this.superJSON.parse(payloadString);
                     if (payload.name === name) {
                         const withReturnValue = options?.withReturnValue;
@@ -708,7 +717,7 @@ export class Session extends EventEmitter<Events> {
                                 if (timeout) {
                                     setTimeout(reject, timeout);
                                 }
-                                await Promise.race([frame.evaluate(seq => {
+                                await Promise.race([target.evaluate(seq => {
                                     if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                                         globalThis.$cdp.callback.returnValues[seq].init = true;
                                     }
@@ -722,7 +731,7 @@ export class Session extends EventEmitter<Events> {
                                 if (timeout) {
                                     setTimeout(reject, timeout);
                                 }
-                                await Promise.race([frame.evaluate((seq, ret) => {
+                                await Promise.race([target.evaluate((seq, ret) => {
                                     if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                                         globalThis.$cdp.callback.returnValues[seq].value = ret;
                                     }
@@ -735,11 +744,19 @@ export class Session extends EventEmitter<Events> {
                                 if (timeout) {
                                     setTimeout(reject, timeout);
                                 }
-                                await Promise.race([frame.evaluate((seq, error) => {
-                                    if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
-                                        globalThis.$cdp.callback.errors[seq].value = error;
+                                try {
+                                    await Promise.race([target.evaluate((seq, error) => {
+                                        if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
+                                            globalThis.$cdp.callback.errors[seq].value = error;
+                                        }
+                                    }, payload.sequence, error), promise]);
+                                } catch (error) {
+                                    if (error instanceof Error) {
+                                        error.message = error.message + `\t(sessionId: ${sessionId})`
+                                        throw new Error(error.message);
                                     }
-                                }, payload.sequence, error), promise]);
+                                    throw error;
+                                }
                                 resolve();
                             }
                         }
@@ -752,12 +769,12 @@ export class Session extends EventEmitter<Events> {
             await this.send('Runtime.addBinding', { name: '$cdp.callback.invoke' });
             this.on('Runtime.bindingCalled', bindingCalled);
         } else {
-            this.#webContents.on('console-message', onConsoleMessage);
+            this.webContents.on('console-message', onConsoleMessage);
         }
-        this.#webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
+        this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
 
         let entry;
-        const removeHandler = (mode === 'CDP') ? () => this.off('Runtime.bindingCalled', bindingCalled) : () => this.#webContents.off('console-message', onConsoleMessage);
+        const removeHandler = (mode === 'CDP') ? () => this.off('Runtime.bindingCalled', bindingCalled) : () => this.webContents.off('console-message', onConsoleMessage);
 
         try {
             const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
@@ -769,7 +786,12 @@ export class Session extends EventEmitter<Events> {
                 removeHandler
             };
         } catch (error) {
-            console.debug('[attachFunction] Failed to inject code :', error);
+            console.trace(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
+            try {
+                await this.evaluate(attachFunction, name, options, this.id);
+            } catch (error) {
+                console.error(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
+            }
             if (mode === 'CDP') {
                 const executionContextCreated = async (context: ExecutionContext) => {
                     try {
@@ -795,7 +817,7 @@ export class Session extends EventEmitter<Events> {
                         }
                     }
                 };
-                this.#webContents.on('frame-created', frameCreated);
+                this.webContents.on('frame-created', frameCreated);
                 entry = {
                     frameCreated,
                     removeHandler
@@ -806,7 +828,7 @@ export class Session extends EventEmitter<Events> {
 
         const promises = [];
 
-        for (const frame of this.#webContents.mainFrame.framesInSubtree) {
+        for (const frame of this.webContents.mainFrame.framesInSubtree) {
             promises.push(frame.evaluate(attachFunction, name, options, this.id, `${frame.processId}-${frame.routingId}`).catch(console.debug));
         }
 
@@ -815,6 +837,7 @@ export class Session extends EventEmitter<Events> {
                 console.debug(error);
             }
         }));
+
         for (const ctx of this.#executionContexts.values()) {
             promises.push(ctx.evaluate(attachFunction, name, options, this.id).catch(error => {
                 if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
@@ -862,17 +885,9 @@ export class Session extends EventEmitter<Events> {
         } else if ('executionContextCreated' in entry) {
             this.off('execution-context-created', entry.executionContextCreated);
         } else {
-            this.#webContents.off('frame-created', entry.frameCreated);
+            this.webContents.off('frame-created', entry.frameCreated);
         }
         // @ts-expect-error : globalThis[name]
-        await Promise.allSettled(this.#webContents.mainFrame.framesInSubtree.map(frame => frame.evaluate(name => delete globalThis[name], name)).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name))));
-    }
-
-    set webContents(newWebContents: WebContents) {
-        this.#webContents = newWebContents;
-    }
-
-    get webContents() {
-        return this.#webContents;
+        await Promise.allSettled(this.webContents.mainFrame.framesInSubtree.map(frame => frame.evaluate(name => delete globalThis[name], name)).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name))));
     }
 }

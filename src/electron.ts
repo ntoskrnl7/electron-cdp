@@ -67,8 +67,9 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
     }
 
     const session = new CDPSession(target);
-
-    session.attach(options?.protocolVersion);
+    if (!target.debugger.isAttached()) {
+        target.debugger.attach(options?.protocolVersion);
+    }
 
     const preloadSuperJSON = options?.preloadSuperJSON;
     if (preloadSuperJSON) {
@@ -97,10 +98,16 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
             }
         } catch (error) {
             if (typeof error === 'string') {
-                throw session.superJSON.parse(error);
-            } else {
-                throw error;
+                let result;
+                try {
+                    result = session.superJSON.parse(error);
+                } catch {
+                }
+                if (result) {
+                    throw result;
+                }
             }
+            throw error;
         }
     };
 
