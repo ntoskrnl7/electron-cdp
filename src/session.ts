@@ -626,7 +626,7 @@ export class Session extends EventEmitter<Events> {
 
                     return promise;
                 };
-                (global[lastName] as Function)['$mode'] = mode;
+                (global[lastName] as CallableFunction)['$mode'] = mode;
             }
         };
 
