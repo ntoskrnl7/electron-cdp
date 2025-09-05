@@ -132,6 +132,5 @@ dist
 *.js
 *.d.ts
 
-!src/
-
+!src/**
 !remove-export.js
