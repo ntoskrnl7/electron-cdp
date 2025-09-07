@@ -12,6 +12,9 @@ A powerful TypeScript library that simplifies Chrome DevTools Protocol (CDP) usa
 - ⚡ **Event Handling**: Built-in event system for CDP events
 - 🛠️ **Function Exposure**: Expose Node.js functions to browser contexts
 - 🔍 **Execution Context Tracking**: Monitor and manage browser execution contexts
+- 🔗 **Auto Target Attachment**: Automatically attach to related targets (iframes, workers, etc.)
+- 📱 **Cross-Platform**: Works on Windows, macOS, and Linux
+- 🎨 **Modern API**: Clean, intuitive API design with async/await support
 
 ## Installation
 
@@ -41,6 +44,17 @@ const session = await attach(window.webContents);
 await session.send('Page.enable');
 await session.send('Page.setBypassCSP', { enabled: true });
 await session.send('Runtime.enable');
+```
+
+### Advanced Configuration
+
+```ts
+// Attach with advanced options
+const session = await attach(window.webContents, {
+  protocolVersion: '1.3',
+  trackExecutionContexts: true,
+  autoAttachToRelatedTargets: ['page', 'iframe', 'worker']
+});
 ```
 
 ### Using the Convenient WebContents Extension
@@ -241,10 +255,15 @@ try {
 ### Attach Function
 
 ```ts
-attach(target: WebContents, options?: {
+attach(target: WebContents, options?: SessionOptions): Promise<Session>
+
+interface SessionOptions {
   protocolVersion?: string;
-  preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void);
-}): Promise<Session>
+  trackExecutionContexts?: boolean;
+  autoAttachToRelatedTargets?: boolean | TargetType[];
+}
+
+type TargetType = 'page' | 'iframe' | 'worker' | 'shared_worker' | 'service_worker' | 'worklet' | 'shared_storage_worklet' | 'browser' | 'webview' | 'other' | 'auction_worklet' | 'assistive_technology';
 ```
 
 ## TypeScript Support
@@ -260,6 +279,139 @@ const result: Protocol.Runtime.EvaluateResponse = await session.send('Runtime.ev
 });
 ```
 
+## Auto Target Attachment
+
+The library can automatically attach to related targets like iframes and workers:
+
+```ts
+// Enable auto attachment to all related targets
+const session = await attach(window.webContents, {
+  autoAttachToRelatedTargets: true
+});
+
+// Or specify target types
+const session = await attach(window.webContents, {
+  autoAttachToRelatedTargets: ['iframe', 'worker', 'shared_worker']
+});
+
+// Listen for new sessions
+session.on('session-attached', (newSession) => {
+  console.log('New target attached:', newSession.target);
+});
+```
+
+## Execution Context Tracking
+
+Monitor execution contexts in real-time:
+
+```ts
+const session = await attach(window.webContents, {
+  trackExecutionContexts: true
+});
+
+// Access all execution contexts
+console.log('Available contexts:', session.executionContexts.size);
+
+// Listen for context events
+session.on('execution-context-created', (context) => {
+  console.log('New context created:', context.id);
+});
+
+session.on('execution-context-destroyed', (contextId) => {
+  console.log('Context destroyed:', contextId);
+});
+```
+
+## Common Use Cases
+
+### Web Scraping
+
+```ts
+const session = await attach(window.webContents);
+
+// Navigate to page
+await session.send('Page.navigate', { url: 'https://example.com' });
+await session.send('Page.loadEventFired');
+
+// Extract data
+const data = await session.evaluate(() => {
+  return {
+    title: document.title,
+    links: Array.from(document.querySelectorAll('a')).map(a => a.href),
+    images: Array.from(document.querySelectorAll('img')).map(img => img.src)
+  };
+});
+```
+
+### Testing and Automation
+
+```ts
+const session = await attach(window.webContents);
+
+// Fill form
+await session.evaluate((formData) => {
+  document.querySelector('#username').value = formData.username;
+  document.querySelector('#password').value = formData.password;
+  document.querySelector('#login-form').submit();
+}, { username: 'test', password: 'secret' });
+
+// Wait for navigation
+await session.send('Page.navigate', { url: 'https://app.example.com/dashboard' });
+```
+
+### Performance Monitoring
+
+```ts
+const session = await attach(window.webContents);
+
+// Enable performance monitoring
+await session.send('Performance.enable');
+await session.send('Runtime.enable');
+
+// Listen for performance metrics
+session.on('Performance.metrics', (params) => {
+  console.log('Performance metrics:', params.metrics);
+});
+
+// Get memory usage
+const memory = await session.evaluate(() => {
+  return {
+    used: performance.memory.usedJSHeapSize,
+    total: performance.memory.totalJSHeapSize,
+    limit: performance.memory.jsHeapSizeLimit
+  };
+});
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**1. CDP Connection Failed**
+```ts
+// Ensure debugger is attached
+if (!webContents.debugger.isAttached()) {
+  webContents.debugger.attach('1.3');
+}
+```
+
+**2. Function Execution Timeout**
+```ts
+// Increase timeout for long-running functions
+const result = await session.evaluate(() => {
+  // Long-running operation
+}, { timeout: 30000 }); // 30 seconds
+```
+
+**3. Serialization Issues**
+```ts
+// Use SuperJSON for complex data types
+await session.enableSuperJSON();
+const result = await session.evaluate((data) => {
+  return new Map(Object.entries(data));
+}, { key: 'value' });
+```
+
 ## Requirements
 
 - Node.js 14+
@@ -273,3 +425,17 @@ ISC
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Changelog
+
+### v0.3.1
+- Added auto target attachment support
+- Improved execution context tracking
+- Enhanced TypeScript definitions
+- Better error handling and debugging
+
+### v0.3.0
+- Initial release with core CDP functionality
+- SuperJSON integration
+- Function execution and exposure
+- Comprehensive TypeScript support

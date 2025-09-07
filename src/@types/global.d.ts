@@ -1,3 +1,5 @@
+/// <reference types="typescript/lib/lib.es2024.promise.d.ts" />
+
 type FrameId = import('../session').FrameId;
 type SessionID = import('devtools-protocol').Protocol.Target.SessionID;
 

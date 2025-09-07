@@ -1,40 +1,50 @@
 {
   "name": "electron-cdp-utils",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "ntoskrnl7@gmail.com",
   "license": "ISC",
   "main": "index.js",
   "scripts": {
-    "build": "tsc && node remove-export.js && esbuild src/superJSON.ts --bundle --outfile=superJSON.js --platform=node && esbuild src/superJSON.ts --bundle --outfile=window.SuperJSON.js --platform=browser --format=iife --global-name=SuperJSON --minify",
+    "build": "tsc && tsc -p ./tsconfig.esm.json && esbuild src/superJSON.ts --bundle --outfile=esm/SuperJSON.browser.js --platform=browser --format=iife --global-name=SuperJSON --minify && node replace-raw-imports.mjs",
     "lint": "concurrently npm:lint:es npm:lint:ox",
     "lint:es": "eslint src/*.ts",
-    "lint:ox": "oxlint",
+    "lint:ox": "oxlint src",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "buffer": "^6.0.3",
-    "devtools-protocol": "^0.0.1503754",
+    "devtools-protocol": "^0.0.1511308",
     "events": "^3.3.0",
     "superjson": "^2.2.2"
   },
   "devDependencies": {
     "@babel/preset-typescript": "^7.27.1",
-    "@types/serviceworker": "^0.0.152",
-    "@types/webworker": "^0.0.27",
     "concurrently": "^9.2.1",
-    "electron": "^37.3.1",
+    "electron": "^38.0.0",
     "esbuild": "^0.25.9",
-    "eslint": "^9.34.0",
+    "eslint": "^9.35.0",
     "oxlint": "^1.14.0",
     "typescript": "^5.9.2",
-    "typescript-eslint": "^8.41.0"
+    "typescript-eslint": "^8.42.0"
   },
+  "sideEffects": [
+    "SuperJSON.browser.js"
+  ],
   "files": [
+    "esm/**.*",
     "*.js",
     "*.d.ts",
     "README.md"
   ],
-  "esm": {
-    "cjs": true
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "require": "./index.js",
+      "import": "./esm/index.js"
+    },
+    "./*": {
+      "require": "./*.js",
+      "import": "./esm/*.js"
+    }
   }
 }

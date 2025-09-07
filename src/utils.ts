@@ -1,9 +1,9 @@
-import { readFileSync } from "fs";
 import { applyPolyfill } from "./global";
 import { Session } from "./session";
 import { SuperJSON } from ".";
 
-const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
+import superJSONBrowserScript from './superJSON.browser.js?raw';
+
 const FunctionSignature = '_$cdp_fn$_';
 
 export function generateScriptString<T, A extends unknown[]>(options: ({ session?: Session, timeout?: number; }) | undefined, fn: (...args: A) => T, ...args: A) {
@@ -13,7 +13,7 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
             (typeof arg === 'string' && arg.trim().startsWith(FunctionSignature)) ? `args[${index}] = ${arg.substring(FunctionSignature.length).toString()};` : '')
         .join(';\n');
     return '(async () => {' +
-        (options?.session?.webContents.hasSuperJSON ?
+        (options?.session?.isSuperJSONPreloaded ?
             `
             globalThis.$cdp ??= {};
             if (globalThis.$cdp.superJSON === undefined) {
@@ -56,7 +56,7 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
             :
 
             `
-            ${SuperJSONScript};
+            ${superJSONBrowserScript};
             (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;
             `
         )

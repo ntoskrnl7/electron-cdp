@@ -1,23 +1,3 @@
-declare global {
-    interface PromiseWithResolvers<T> {
-        promise: Promise<T>;
-        resolve: (value: T | PromiseLike<T>) => void;
-        reject: (reason?: unknown) => void;
-    }
-
-    interface PromiseConstructor {
-        /**
-         * Creates a new Promise and returns it in an object, along with its resolve and reject functions.
-         * @returns An object with the properties `promise`, `resolve`, and `reject`.
-         *
-         * ```ts
-         * const { promise, resolve, reject } = Promise.withResolvers<T>();
-         * ```
-         */
-        withResolvers<T>(): PromiseWithResolvers<T>;
-    }
-}
-
 export function applyPolyfill() {
     if (!Promise.withResolvers) {
         const value = <T>() => {
@@ -33,9 +13,7 @@ export function applyPolyfill() {
                 reject: reject!,
             };
         }
-        try {
-            Object.defineProperty(Promise, 'withResolvers', { value, configurable: true });
-        } catch {
+        if (!Reflect.defineProperty(Promise, 'withResolvers', { value, writable: true, enumerable: false, configurable: true })) {
             Promise.withResolvers = value;
         }
     };

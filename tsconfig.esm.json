@@ -1,10 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2019",
-    "module": "CommonJS",
+    "module": "ESNext",
     "declaration": true,
-    "declarationDir": ".",
-    "outDir": ".",
+    "declarationDir": "./esm",
+    "outDir": "./esm",
     "rootDir": "src",
     "strict": true,
     "moduleResolution": "node",

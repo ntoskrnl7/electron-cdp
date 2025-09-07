@@ -1,15 +1,17 @@
+/// <reference types="typescript/lib/lib.dom" />
+/// <reference types="typescript/lib/lib.webworker" />
+
 import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import Electron, { WebContents, webFrameMain } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
-import { readFileSync } from 'fs';
 import { registerTypes } from './superJSON';
 
-declare const globalThis: GlobalThis;
+import superJSONBrowserScript from './superJSON.browser.js?raw';
 
-const SuperJSONScript = readFileSync(require.resolve('./window.SuperJSON')).toString();
+declare const globalThis: GlobalThis;
 
 function convertToFunction(code: string) {
     const trimmedCode = code.trim();
@@ -37,7 +39,7 @@ function getWebFrameFromFrameId(frameId: FrameId) {
  * Options for sending commands.
  */
 export declare interface CommandOptions {
-    /** 
+    /**
      * Maximum time in milliseconds to wait for the CDP command to complete.
      * Default: Infinity
      */
@@ -50,8 +52,10 @@ export declare interface CommandOptions {
 export declare type Events = {
     [Property in keyof ProtocolMapping.Events]: [...ProtocolMapping.Events[Property], sessionId?: Protocol.Target.SessionID];
 } & {
-    'execution-context-created': [ExecutionContext];
-    'execution-context-destroyed': [Protocol.Runtime.ExecutionContextDestroyedEvent & { sessionId?: Protocol.Target.SessionID }];
+    'execution-context-created': [context: ExecutionContext];
+    'execution-context-destroyed': [event: Protocol.Runtime.ExecutionContextDestroyedEvent];
+    'execution-contexts-cleared': [];
+    'session-attached': [session: Session, url: string];
 };
 
 /**
@@ -144,21 +148,132 @@ type ExposeFunction =
     XOR<[{ executionContextCreated: (context: ExecutionContext) => Promise<void>; }, { frameCreated: (event: Electron.Event, details: Electron.FrameCreatedDetails) => void }, { scriptId: Protocol.Page.ScriptIdentifier; }]>
     &
     { removeHandler: () => void };
+export interface Target extends Omit<Protocol.Target.TargetInfo, 'url' | 'title' | 'type' | 'targetId'> {
+    /**
+     * Type of target.
+     *
+     * Target.type in Protocol.Target.TargetInfo.
+     *
+     * @see - [List of types](https://source.chromium.org/chromium/chromium/src/+/main:content/browser/devtools/devtools_agent_host_impl.cc?ss=chromium&q=f:devtools%20-f:out%20%22::kTypeTab%5B%5D%22)
+     */
+    type: 'tab' | 'page' | 'iframe' | 'worker' | 'shared_worker' | 'service_worker' | 'worklet' | 'shared_storage_worklet' | 'browser' | 'webview' | 'other' | 'auction_worklet' | 'assistive_technology';
+
+    /**
+     * Target ID.
+     *
+     * @link [Protocol.Target.TargetID](https://chromedevtools.github.io/devtools-protocol/tot/Target/#type-TargetID)
+     */
+    id: Protocol.Target.TargetID
+};
+
+/**
+ * Options for creating a Session.
+ */
+export interface SessionOptions {
+    /**
+     * Whether to track Runtime execution context and maintain a map of them in the `executionContexts` property.
+     *
+     * When enabled, the session will listen for execution context lifecycle events (created/destroyed/cleared)
+     * and expose them as ExecutionContext objects.
+     *
+     * Default: `undefined`
+     *
+     * - `false`, `undefined` : No tracking of execution contexts.
+     * - `true` : Tracking of execution contexts.
+     */
+    trackExecutionContexts?: boolean;
+
+    /**
+     * Protocol version to use when attaching the debugger.
+     */
+    protocolVersion?: string | undefined;
+
+    /**
+     * Whether to automatically attach to related targets.
+     * 
+     * default: `undefined`
+     * 
+     * - `false`, `undefined` : No auto attachment to related targets.
+     * - `true` : Auto attachment to related targets.
+     * - `TargetType[]` : Auto attachment to related targets of the specified types.
+     */
+    autoAttachToRelatedTargets?: boolean | (Target['type'][]) | undefined;
+}
+
+/**
+ * Options for setting auto attach.
+ */
+export interface SetAutoAttachOptions {
+    /**
+     * Target types to attach to.
+     */
+    targetTypes?: Target['type'][];
+
+    /**
+     * Whether to attach to related targets recursively.
+     */
+    recursive?: boolean;
+}
 
 /**
  * Represents a session for interacting with the browser's DevTools protocol.
  */
 export class Session extends EventEmitter<Events> {
 
+    #target?: Target;
+
     readonly id?: Protocol.Target.SessionID;
     readonly webContents: WebContents;
 
+    #isSuperJSONPreloaded = false;
     #superJSON: SuperJSON;
     #customizeSuperJSON: CustomizeSuperJSONFunction = () => { };
 
     readonly #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
 
     readonly #exposeFunctions: Map<string, ExposeFunction> = new Map();
+
+    #trackExecutionContextsEnabled = false;
+    #autoAttachToRelatedTargetsEnabled = false;
+
+    /**
+     * Indicates whether automatic attachment to related targets is enabled.
+     */
+    get autoAttachToRelatedTargetsEnabled() {
+        return this.#autoAttachToRelatedTargetsEnabled;
+    }
+
+    /**
+     * Indicates whether tracking of execution contexts is enabled.
+     */
+    get trackExecutionContextsEnabled() {
+        return this.#trackExecutionContextsEnabled;
+    }
+
+    /**
+     * Gets information about the target associated with this session.
+     *
+     * @returns Information about the target associated with this session.
+     */
+    async getTargetInfo() {
+        const ret = (await this.send('Target.getTargetInfo')).targetInfo;
+        this.#target = { ...ret, id: ret.targetId } as Target;
+        return ret;
+    }
+
+    /**
+     * Gets the target associated with this session.
+     *
+     * @throws If the target is not yet initialized.
+     *
+     * @return The target associated with this session.
+     */
+    get target() {
+        if (this.#target === undefined) {
+            throw new Error('target is not yet initialized');
+        }
+        return this.#target;
+    }
 
     /**
      * Retrieves the list of execution contexts.
@@ -219,36 +334,235 @@ export class Session extends EventEmitter<Events> {
      *
      * @param webContents - The WebContents used to issue the CDP command.
      * @param targetId - Target ID of the page/iframe/worker/etc. to attach to.
+     * @param options - Optional settings for the session.
+     *
      * @returns A `Session` bound to the attached target's session.
      */
-    static async fromTargetId(webContents: WebContents, targetId: Protocol.Target.TargetID) {
-        const session = new Session(webContents);
-        const { sessionId } = await session.send('Target.attachToTarget', { targetId, flatten: true });
-        return new Session(webContents, sessionId);
+    static async fromTargetId(webContents: WebContents, targetId: Protocol.Target.TargetID, options?: SessionOptions) {
+        if (!webContents.debugger.isAttached()) {
+            webContents.debugger.attach();
+        }
+        const { sessionId } = await webContents.debugger.sendCommand('Target.attachToTarget', { targetId, flatten: true });
+        const session = await this.fromSessionId(webContents, sessionId, options);
+        const targetInfo = await session.getTargetInfo();
+        session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+        return session;
+    }
+
+    /**
+     * Creates a new Session instance from a target info.
+     *
+     * @param webContents - The WebContents this session communicates with via CDP.
+     * @param targetInfo - The target info to bind the session to.
+     * @param options - Optional settings for the session.
+     */
+    static async fromTargetInfo(webContents: WebContents, targetInfo: Protocol.Target.TargetInfo, options?: SessionOptions) {
+        const session = await this.fromTargetId(webContents, targetInfo.targetId, options);
+        session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+        return session;
+    }
+
+    /**
+     *  Creates a new Session instance from an existing DevTools Protocol session ID.
+     *  This method is useful when you already have a session ID and want to create a
+     *  Session instance to interact with that specific session.
+     *
+     * @param webContents - The WebContents this session communicates with via CDP.
+     * @param sessionId - The DevTools Protocol session ID to bind the session to.
+     * @param options - Optional settings for the session.
+     *
+     * @returns A promise that resolves with the created Session instance.
+     */
+    static async fromSessionId(webContents: WebContents, sessionId: Protocol.Target.SessionID, options?: SessionOptions) {
+        if (!webContents.debugger.isAttached()) {
+            webContents.debugger.attach(options?.protocolVersion);
+        }
+        return new Session(webContents, sessionId, options?.protocolVersion).applyOptions(options);
+    }
+
+    /**
+     * Applies the specified options to the session.
+     *
+     * @param options - Optional settings for the session.
+     *
+     * @returns The session instance.
+     */
+    async applyOptions(options?: Omit<SessionOptions, 'protocolVersion'>) {
+        const promises = [];
+        if (options?.autoAttachToRelatedTargets) {
+            promises.push(this.setAutoAttach({ recursive: options.autoAttachToRelatedTargets !== undefined, targetTypes: options.autoAttachToRelatedTargets === true ? undefined : options.autoAttachToRelatedTargets }));
+        }
+        if (options?.trackExecutionContexts) {
+            promises.push(this.enableTrackExecutionContexts());
+        }
+        await Promise.all(promises);
+        return this;
+    }
+
+    /**
+     * Enables tracking of execution contexts within the session.
+     *
+     * When enabled, the session will listen for execution context lifecycle events (`execution-context-created`, `execution-context-destroyed`, `execution-contexts-cleared)
+     * and maintain a map of active execution contexts.
+     *
+     * This method sends the `Runtime.enable` command and starts tracking for all subsequently created execution contexts.
+     *
+     * **[!caution] `Runtime.enable` is a function that requires caution as it can be detected by bots. Please be aware of this when using it.**
+     *
+     * @returns A promise that resolves to `true` if tracking was successfully enabled, or `false` if it was already enabled.
+     * @throws Any errors that occur during the enabling process will be propagated.
+     */
+    async enableTrackExecutionContexts() {
+        if (this.#trackExecutionContextsEnabled) {
+            return false;
+        }
+
+        if (this.getMaxListeners() <= this.listenerCount('execution-context-created')) {
+            this.setMaxListeners(this.listenerCount('execution-context-created') + 1);
+        }
+        if (this.getMaxListeners() <= this.listenerCount('execution-context-destroyed')) {
+            this.setMaxListeners(this.listenerCount('execution-context-destroyed') + 1);
+        }
+        if (this.getMaxListeners() <= this.listenerCount('execution-contexts-cleared')) {
+            this.setMaxListeners(this.listenerCount('execution-contexts-cleared') + 1);
+        }
+        this
+            .on('Runtime.executionContextCreated', ({ context }) => {
+                const ctx = new ExecutionContext(this, context);
+                this.#executionContexts.set(context.id, ctx);
+                this.emit('execution-context-created', ctx);
+            })
+            .on('Runtime.executionContextDestroyed', event => {
+                this.emit('execution-context-destroyed', event);
+                this.#executionContexts.delete(event.executionContextId);
+                for (const ctx of this.#executionContexts.values()) {
+                    if (ctx.id && ctx.description?.uniqueId === event.executionContextUniqueId) {
+                        this.#executionContexts.delete(ctx.id);
+                    }
+                }
+            })
+            .on('Runtime.executionContextsCleared', () => {
+                this.#executionContexts.clear();
+                this.emit('execution-contexts-cleared');
+            });
+
+        await this.send('Runtime.enable');
+        this.#trackExecutionContextsEnabled = true;
+        return true;
+    }
+
+    /**
+     *  Enables automatic attachment to related targets such as iframes and workers.
+     *
+     *  When enabled, the session will listen for target lifecycle events and automatically attach to new targets of the specified types.
+     *
+     *  This method sends the `Target.setAutoAttach` command with the appropriate parameters.
+     *
+     * @param options - An optional object containing options for setting auto attach.
+     * @returns A promise that resolves to `true` if auto-attachment was successfully enabled, or `false` if it was already enabled.
+     */
+    async setAutoAttach(options?: SetAutoAttachOptions) {
+        if (this.#autoAttachToRelatedTargetsEnabled) {
+            return false;
+        }
+
+        const { browserContextId, type } = (await this.getTargetInfo());
+
+        const filter: Protocol.Target.TargetFilter | undefined = options?.targetTypes?.map?.(type => ({ type }));
+
+        if (this.getMaxListeners() <= this.listenerCount('Target.attachedToTarget')) {
+            this.setMaxListeners(this.listenerCount('Target.attachedToTarget') + 1);
+        }
+        if (this.getMaxListeners() <= this.listenerCount('Target.targetCreated')) {
+            this.setMaxListeners(this.listenerCount('Target.targetCreated') + 1);
+        }
+        this
+            .on('Target.attachedToTarget', async ({ sessionId, targetInfo }) => {
+                const session = await Session.fromSessionId(this.webContents, sessionId);
+
+                session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+                if (this.webContents.cdp !== this) {
+                    this.webContents.cdp?.emit?.('session-attached', session, targetInfo.url);
+                }
+                this.emit('session-attached', session, targetInfo.url);
+
+                if (options?.recursive) {
+                    session.setAutoAttach(options);
+                }
+            })
+            .on('Target.targetCreated', async ({ targetInfo }) => {
+                //
+                // Ignore targets from other browser contexts.
+                //
+                if (targetInfo.browserContextId !== browserContextId) {
+                    return;
+                }
+
+                //
+                // The shared worker is not automatically attached via the Target.setAutoAttach command,
+                // so we attach it directly here.
+                //
+                if (targetInfo.type === 'shared_worker') {
+                    await this.send('Target.attachToTarget', { targetId: targetInfo.targetId, flatten: true });
+                }
+            });
+
+        await this.send('Target.setAutoAttach', {
+            autoAttach: true,
+            flatten: true,
+            waitForDebuggerOnStart: false,
+            filter
+        });
+
+        //
+        // The shared worker does not trigger the `Target.targetCreated` event for the current debugger session,
+        // so we set it up to receive the creation event for the shared worker through the `Target.setDiscoverTargets` command.
+        //
+        try {
+            await this.send('Target.setDiscoverTargets', { discover: true, filter });
+        } catch (error) {
+            //
+            // Target.setDiscoverTargets should succeed for 'page' and 'iframe' types.
+            // For other types, it's expected to fail with "Not Allowed" error.
+            // Only log warnings when it fails for page/iframe types where success is expected.
+            //
+            if (type === 'page' || type === 'iframe') {
+                console.warn('Failed to `Target.setDiscoverTargets` command:', error);
+            }
+        }
+
+        this.#autoAttachToRelatedTargetsEnabled = true;
+
+        return true;
     }
 
     /**
      * Creates a new Session instance bound to a specific WebContents.
      *
      * @param webContents - The WebContents this session communicates with via CDP.
-     * @param sessionId - Optional DevTools Protocol session ID. If provided,
-     *                    only messages for this session are handled.
-     * @param trackExecutionContexts - Whether to track Runtime execution context
-     *                                 lifecycle events (created/destroyed/cleared)
-     *                                 and expose them as ExecutionContext objects.
+     * @param sessionId - Optional session ID to bind to. If omitted, binds to the main session.
+     * @param protocolVersion - Optional DevTools Protocol version to use.
      */
-    constructor(webContents: WebContents, sessionId?: Protocol.Target.SessionID, trackExecutionContexts = false) {
+    constructor(webContents: WebContents, sessionId?: Protocol.Target.SessionID, protocolVersion?: string | undefined) {
         super();
+
         this.id = sessionId;
+        this.webContents = webContents;
         this.#superJSON = new SuperJSON();
+
         registerTypes(this.#superJSON);
 
-        this.webContents = webContents;
-
         if (!webContents.debugger.isAttached()) {
-            webContents.debugger.attach();
+            webContents.debugger.attach(protocolVersion);
         }
 
+        this.getTargetInfo().then(targetInfo => {
+            this.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+        });
+
+        if (webContents.debugger.getMaxListeners() <= webContents.debugger.listenerCount('message')) {
+            webContents.debugger.setMaxListeners(webContents.debugger.listenerCount('message') + 1);
+        }
         webContents.debugger.on('message', (_, method, params, sessionId) => {
             if (this.id === undefined && sessionId) {
                 return;
@@ -257,25 +571,6 @@ export class Session extends EventEmitter<Events> {
                 return;
             }
             this.emit(method as keyof ProtocolMapping.Events, params, sessionId || undefined);
-
-            if (trackExecutionContexts) {
-                switch (method) {
-                    case 'Runtime.executionContextCreated': {
-                        const event = params as Protocol.Runtime.ExecutionContextCreatedEvent;
-                        const ctx = new ExecutionContext(this, event.context);
-                        this.#executionContexts.set(event.context.id, ctx);
-                        this.emit('execution-context-created', ctx);
-                        break;
-                    }
-                    case 'Runtime.executionContextDestroyed':
-                        this.emit('execution-context-destroyed', { ...params, sessionId });
-                        this.#executionContexts.delete((params as Protocol.Runtime.ExecutionContextDestroyedEvent).executionContextId);
-                        break;
-                    case 'Runtime.executionContextsCleared':
-                        this.#executionContexts.clear();
-                        break;
-                }
-            }
         });
     }
 
@@ -307,26 +602,15 @@ export class Session extends EventEmitter<Events> {
     }
 
     /**
-     * Ensures that the SuperJSON library is loaded and available
-     * for use within the web contents context.
+     *  Enables SuperJSON to be preloaded into all contexts of the web contents.
      *
-     * This method checks if SuperJSON is already loaded by inspecting
-     * the `hasSuperJSON` flag on the web contents. If it is not loaded,
-     * the method loads SuperJSON by evaluating a script in the browser context.
-     *
-     * Once SuperJSON is loaded, it sets up a listener to ensure that
-     * SuperJSON is reloaded in any newly created execution contexts.
-     *
-     * @param customizeSuperJSON An optional callback function to customize the SuperJSON instance before it is set up.
-     * This function receives the SuperJSON instance and can perform any required modifications.
-     *
+     * @param customizeSuperJSON - An optional callback function to customize the SuperJSON instance before it is set up.
      * @returns A promise that resolves when SuperJSON has been successfully loaded.
      *
-     * @throws Any errors that occur during the execution of the script
-     * will be logged to the console.
+     * @throws Any errors that occur during the execution of the script will be logged to the console.
      */
-    async enableSuperJSON(customizeSuperJSON?: CustomizeSuperJSONFunction) {
-        if (this.webContents.hasSuperJSON) {
+    async enableSuperJSONPreload(customizeSuperJSON?: CustomizeSuperJSONFunction): Promise<void> {
+        if (this.#isSuperJSONPreloaded) {
             if (customizeSuperJSON) {
                 await this.configureSuperJSON(customizeSuperJSON);
             }
@@ -337,11 +621,14 @@ export class Session extends EventEmitter<Events> {
             this.customizeSuperJSON = customizeSuperJSON;
         }
 
-        const source = `${SuperJSONScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;`;
+        const source = `${superJSONBrowserScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;`;
         try {
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
             console.error('[Session.enableSuperJSON] Failed to inject code :', error);
+            if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('frame-created')) {
+                this.webContents.setMaxListeners(this.webContents.listenerCount('frame-created') + 1);
+            }
             this.webContents.on('frame-created', (_, details) => details.frame?.executeJavaScript(source).catch(console.error));
             for (const frame of this.webContents.mainFrame.framesInSubtree) {
                 frame.executeJavaScript(source).catch(console.error);
@@ -362,7 +649,14 @@ export class Session extends EventEmitter<Events> {
         for (const contextId of this.#executionContexts.keys()) {
             this.send('Runtime.evaluate', { ...buildParams(), contextId }).catch(console.error);
         }
-        this.webContents.hasSuperJSON = true;
+        this.#isSuperJSONPreloaded = true;
+    }
+
+    /**
+     * Checks if SuperJSON is preloaded in the web contents.
+     */
+    get isSuperJSONPreloaded() {
+        return this.#isSuperJSONPreloaded;
     }
 
     /**
@@ -428,8 +722,12 @@ export class Session extends EventEmitter<Events> {
      * @throws Any errors that occur during the execution of the script will be logged to the console.
      */
     async configureSuperJSON(customizeSuperJSON: CustomizeSuperJSONFunction) {
-        if (!this.webContents.hasSuperJSON) {
-            return await this.enableSuperJSON(customizeSuperJSON);
+        if (!this.#isSuperJSONPreloaded) {
+            return await this.enableSuperJSONPreload(customizeSuperJSON);
+        }
+
+        if (this.customizeSuperJSON === customizeSuperJSON) {
+            return;
         }
 
         this.customizeSuperJSON = customizeSuperJSON;
@@ -769,7 +1067,13 @@ export class Session extends EventEmitter<Events> {
             await this.send('Runtime.addBinding', { name: '$cdp.callback.invoke' });
             this.on('Runtime.bindingCalled', bindingCalled);
         } else {
+            if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('console-message')) {
+                this.webContents.setMaxListeners(this.webContents.listenerCount('console-message') + 1);
+            }
             this.webContents.on('console-message', onConsoleMessage);
+        }
+        if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('destroyed')) {
+            this.webContents.setMaxListeners(this.webContents.listenerCount('destroyed') + 1);
         }
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
 
@@ -802,6 +1106,9 @@ export class Session extends EventEmitter<Events> {
                         }
                     }
                 };
+                if (this.getMaxListeners() <= this.listenerCount('execution-context-created')) {
+                    this.setMaxListeners(this.listenerCount('execution-context-created') + 1);
+                }
                 this.on('execution-context-created', executionContextCreated);
                 entry = {
                     executionContextCreated,
@@ -817,6 +1124,9 @@ export class Session extends EventEmitter<Events> {
                         }
                     }
                 };
+                if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('frame-created')) {
+                    this.webContents.setMaxListeners(this.webContents.listenerCount('frame-created') + 1);
+                }
                 this.webContents.on('frame-created', frameCreated);
                 entry = {
                     frameCreated,

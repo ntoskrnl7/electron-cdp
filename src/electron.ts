@@ -1,6 +1,6 @@
 
 import { WebContents, WebFrameMain, webFrameMain } from 'electron';
-import { Session as CDPSession, generateScriptString, SuperJSON } from '.';
+import { Session as CDPSession, generateScriptString, SessionOptions, SuperJSON } from '.';
 
 declare global {
     // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -9,17 +9,9 @@ declare global {
             /**
              * Retrieves the current CDP (Chrome DevTools Protocol) session associated with the web contents.
              *
-             * @returns The CDP Session object for the web contents.
+             * @returns The CDP Session object for the web contents. If no session is attached, it returns `undefined`.
              */
-            get cdp(): CDPSession;
-            /**
-             * Indicates whether the SuperJSON library is preloaded and available
-             * within the web contents' context.
-             *
-             * @returns A boolean value. `true` if SuperJSON is preloaded and can be
-             * accessed globally within the web contents, `false` otherwise.
-             */
-            hasSuperJSON: boolean;
+            get cdp(): CDPSession | undefined;
         }
 
         interface WebFrameMain {
@@ -60,25 +52,23 @@ declare global {
  * @returns A promise that resolves with the created CDPSession instance.
  * @throws Will throw an error if a CDP session is already attached to the target.
  */
-export async function attach(target: WebContents, options?: { protocolVersion?: string, preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void) }) {
+export async function attach(target: WebContents, options?: { protocolVersion?: string, preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void) } & SessionOptions) {
 
     if (isAttached(target)) {
         throw new Error('CDP session already attached');
     }
 
-    const session = new CDPSession(target);
-    if (!target.debugger.isAttached()) {
-        target.debugger.attach(options?.protocolVersion);
-    }
+    const session = new CDPSession(target, undefined, options?.protocolVersion);
+
+    const promises = [];
+    promises.push(session.applyOptions(options));
 
     const preloadSuperJSON = options?.preloadSuperJSON;
     if (preloadSuperJSON) {
-        await session.enableSuperJSON(typeof preloadSuperJSON === 'boolean' ? undefined : preloadSuperJSON);
+        promises.push(session.enableSuperJSONPreload(typeof preloadSuperJSON === 'boolean' ? undefined : preloadSuperJSON));
     }
 
-    Object.defineProperty(target, 'cdp', { get: () => session });
-
-    await session.send('Page.addScriptToEvaluateOnNewDocument', {
+    promises.push(session.send('Page.addScriptToEvaluateOnNewDocument', {
         runImmediately: true,
         source: `
             globalThis.$cdp ??= {};
@@ -87,33 +77,31 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
                 globalThis.$cdp.frameId = promise;
                 globalThis.$cdp.frameIdResolve = resolve;
             }`
-    });
-
-    const evaluate = async function <A0, A extends unknown[], R>(this: WebFrameMain, userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> {
-        try {
-            if (typeof userGestureOrFn === 'boolean') {
-                return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
-            } else {
-                return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
-            }
-        } catch (error) {
-            if (typeof error === 'string') {
-                let result;
-                try {
-                    result = session.superJSON.parse(error);
-                } catch {
-                }
-                if (result) {
-                    throw result;
-                }
-            }
-            throw error;
-        }
-    };
+    }));
 
     const initializeFrame = async (frame: WebFrameMain | undefined | null) => {
         if (frame && !frame.isDestroyed()) {
-            frame.evaluate = evaluate;
+            frame.evaluate = async function <A0, A extends unknown[], R>(this: WebFrameMain, userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> {
+                try {
+                    if (typeof userGestureOrFn === 'boolean') {
+                        return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
+                    } else {
+                        return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
+                    }
+                } catch (error) {
+                    if (typeof error === 'string') {
+                        let result;
+                        try {
+                            result = session.superJSON.parse(error);
+                        } catch {
+                        }
+                        if (result) {
+                            throw result;
+                        }
+                    }
+                    throw error;
+                }
+            }
             await frame.executeJavaScript(`
                 globalThis.$cdp ??= {};
                 if (globalThis.$cdp.frameIdResolve) {
@@ -131,6 +119,10 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
         .on('frame-created', async (_, details) => initializeFrame(details.frame))
         .on('will-frame-navigate', details => initializeFrame(details.frame))
         .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => initializeFrame(webFrameMain.fromId(frameProcessId, frameRoutingId)));
+
+    await Promise.all(promises);
+
+    Object.defineProperty(target, 'cdp', { get: () => session });
 
     return session;
 }
