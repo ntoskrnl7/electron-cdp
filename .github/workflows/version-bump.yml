@@ -66,19 +66,23 @@ jobs:
         git push origin main
         git push origin --tags
     
+    - name: Get version
+      id: get-version
+      run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+    
     - name: Create Pull Request
       if: github.event_name == 'workflow_dispatch'
       uses: peter-evans/create-pull-request@v5
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        commit-message: 'chore: bump version to $(node -p "require('./package.json').version")'
-        title: 'Version bump to $(node -p "require('./package.json').version")'
+        commit-message: 'chore: bump version to ${{ steps.get-version.outputs.version }}'
+        title: 'Version bump to ${{ steps.get-version.outputs.version }}'
         body: |
-          This PR bumps the version to $(node -p "require('./package.json').version").
+          This PR bumps the version to ${{ steps.get-version.outputs.version }}.
           
           **Version Type:** ${{ inputs.version_type }}
           ${{ inputs.version_type == 'prerelease' && format('**Prerelease Type:** {0}', inputs.prerelease_type) || '' }}
           
           The version bump will trigger the publish workflow automatically.
-        branch: version-bump-$(node -p "require('./package.json').version")
+        branch: version-bump-${{ steps.get-version.outputs.version }}
         delete-branch: true
