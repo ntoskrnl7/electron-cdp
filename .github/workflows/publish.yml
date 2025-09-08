@@ -49,7 +49,7 @@ jobs:
           echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
         else
           # Check if package.json version is higher than latest published
-          LATEST_VERSION=$(npm view ${{ github.repository }} version 2>/dev/null || echo "0.0.0")
+          LATEST_VERSION=$(npm view electron-cdp-utils version 2>/dev/null || echo "0.0.0")
           echo "Latest published version: $LATEST_VERSION"
           
           # Compare versions
