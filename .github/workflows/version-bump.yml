@@ -71,8 +71,8 @@ jobs:
       uses: peter-evans/create-pull-request@v5
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        commit-message: "chore: bump version to $(node -p "require('./package.json').version")"
-        title: "Version bump to $(node -p "require('./package.json').version")"
+        commit-message: 'chore: bump version to $(node -p "require('./package.json').version")'
+        title: 'Version bump to $(node -p "require('./package.json').version")'
         body: |
           This PR bumps the version to $(node -p "require('./package.json').version").
           
