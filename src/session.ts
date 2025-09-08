@@ -47,6 +47,31 @@ export declare interface CommandOptions {
 }
 
 /**
+ * A session with a guaranteed session ID.
+ */
+export type SessionWithId = Session & { id: Protocol.Target.SessionID };
+
+/**
+ * A detached session.
+ */
+export type DetachedSession = Pick<Session,
+    | 'id'
+    | 'target'
+    | 'webContents'
+    | 'executionContexts'
+    | 'superJSON'
+    | 'isSuperJSONPreloaded'
+    | 'trackExecutionContextsEnabled'
+    | 'autoAttachToRelatedTargetsEnabled'
+    | 'equals'
+>;
+
+/**
+ * A detached session with a guaranteed session ID.
+ */
+export type DetachedSessionWithId = DetachedSession & { id: Protocol.Target.SessionID };
+
+/**
  * Type mapping for events.
  */
 export declare type Events = {
@@ -55,8 +80,8 @@ export declare type Events = {
     'execution-context-created': [context: ExecutionContext];
     'execution-context-destroyed': [event: Protocol.Runtime.ExecutionContextDestroyedEvent];
     'execution-contexts-cleared': [];
-    'session-attached': [session: Session, url: string];
-    'session-detached': [id: Protocol.Target.SessionID, reason: 'detached' | 'destroyed' | 'web-contents detached' | 'web-contents destroyed', session: Session];
+    'session-attached': [session: SessionWithId, url: string];
+    'session-detached': [session: DetachedSessionWithId, reason: 'detached' | 'destroyed' | 'web-contents detached' | 'web-contents destroyed'];
 };
 
 /**
@@ -286,6 +311,20 @@ export class Session extends EventEmitter<Events> {
     }
 
     /**
+     * Compares this session with another session for equality.
+     * Two sessions are considered equal if they have the same ID.
+     *
+     * @param other - The session to compare with.
+     * @returns True if the sessions are equal, false otherwise.
+     */
+    equals(other: Session): boolean {
+        if (this.id === undefined || other.id === undefined) {
+            return this.webContents.id === other.webContents.id;
+        }
+        return this.id === other.id;
+    }
+
+    /**
      * Evaluates the provided function with the given arguments in the context of the current page.
      *
      * @param fn - The function to be evaluated.
@@ -378,7 +417,7 @@ export class Session extends EventEmitter<Events> {
         if (!webContents.debugger.isAttached()) {
             webContents.debugger.attach(options?.protocolVersion);
         }
-        return new Session(webContents, sessionId, options?.protocolVersion).applyOptions(options);
+        return (new Session(webContents, sessionId, options?.protocolVersion) as SessionWithId).applyOptions(options);
     }
 
     /**
@@ -483,7 +522,7 @@ export class Session extends EventEmitter<Events> {
         if (this.getMaxListeners() <= this.listenerCount('Target.targetDestroyed')) {
             this.setMaxListeners(this.listenerCount('Target.targetDestroyed') + 1);
         }
-        const attachedSessions = new Map<Protocol.Target.SessionID, Session>();
+        const attachedSessions = new Map<Protocol.Target.SessionID, SessionWithId>();
 
         if (this.webContents.debugger.getMaxListeners() <= this.webContents.debugger.listenerCount('detached')) {
             this.webContents.debugger.setMaxListeners(this.webContents.debugger.listenerCount('detached') + 1);
@@ -491,7 +530,7 @@ export class Session extends EventEmitter<Events> {
         this.webContents.debugger.on('detach', () => {
             attachedSessions.forEach(session => {
                 if (session.id) {
-                    this.emit('session-detached', session.id, 'web-contents detached', session);
+                    this.emit('session-detached', session, 'web-contents detached');
                 }
             });
             attachedSessions.clear();
@@ -503,7 +542,7 @@ export class Session extends EventEmitter<Events> {
         this.webContents.on('destroyed', () => {
             attachedSessions.forEach(session => {
                 if (session.id) {
-                    this.emit('session-detached', session.id, 'web-contents destroyed', session);
+                    this.emit('session-detached', session, 'web-contents destroyed');
                 }
             });
             attachedSessions.clear();
@@ -517,9 +556,9 @@ export class Session extends EventEmitter<Events> {
 
                 session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
                 if (this.webContents.cdp !== this) {
-                    this.webContents.cdp?.emit?.('session-attached', session, targetInfo.url);
+                    this.webContents.cdp?.emit?.('session-attached', session as SessionWithId, targetInfo.url);
                 }
-                this.emit('session-attached', session, targetInfo.url);
+                this.emit('session-attached', session as SessionWithId, targetInfo.url);
 
                 if (options?.recursive) {
                     session.setAutoAttach(options);
@@ -545,14 +584,14 @@ export class Session extends EventEmitter<Events> {
                 const session = attachedSessions.get(sessionId);
                 if (session) {
                     attachedSessions.delete(sessionId);
-                    this.emit('session-detached', sessionId, 'detached', session);
+                    this.emit('session-detached', session, 'detached');
                 }
             })
             .prependListener('Target.targetDestroyed', async ({ targetId }) => {
                 attachedSessions.forEach(session => {
                     if (session.id && session.target.id === targetId) {
                         attachedSessions.delete(session.id);
-                        this.emit('session-detached', session.id, 'destroyed', session);
+                        this.emit('session-detached', session, 'destroyed');
                     }
                 });
             });

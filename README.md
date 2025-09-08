@@ -5,16 +5,18 @@ A powerful TypeScript library that simplifies Chrome DevTools Protocol (CDP) usa
 ## Features
 
 - 🚀 **Easy CDP Integration**: Simple API for Chrome DevTools Protocol commands
-- 🔧 **Function Execution**: Execute TypeScript/JavaScript functions in browser contexts
+- 🔧 **Function Execution**: Execute TypeScript/JavaScript functions in browser contexts with full type safety
 - 📦 **SuperJSON Support**: Advanced serialization for complex data types (Date, Map, Set, Error, Buffer, etc.)
-- 🎯 **Type Safety**: Full TypeScript support with comprehensive type definitions
-- 🔄 **Frame Management**: Support for iframes and multiple execution contexts
-- ⚡ **Event Handling**: Built-in event system for CDP events
-- 🛠️ **Function Exposure**: Expose Node.js functions to browser contexts
-- 🔍 **Execution Context Tracking**: Monitor and manage browser execution contexts
+- 🎯 **Type Safety**: Full TypeScript support with comprehensive type definitions and strict typing
+- 🔄 **Frame Management**: Support for iframes and multiple execution contexts with automatic frame detection
+- ⚡ **Event Handling**: Built-in event system for CDP events with proper type definitions
+- 🛠️ **Function Exposure**: Expose Node.js functions to browser contexts with retry and timeout options
+- 🔍 **Execution Context Tracking**: Monitor and manage browser execution contexts in real-time
 - 🔗 **Auto Target Attachment**: Automatically attach to related targets (iframes, workers, etc.)
 - 📱 **Cross-Platform**: Works on Windows, macOS, and Linux
 - 🎨 **Modern API**: Clean, intuitive API design with async/await support
+- 🔒 **Session Management**: Advanced session lifecycle management with proper cleanup
+- 🎭 **Type-Safe Events**: Strongly typed event system for better developer experience
 
 ## Installation
 
@@ -131,7 +133,7 @@ const result = await context.evaluate(() => {
 
 ### Event Handling
 
-Listen to CDP events:
+Listen to CDP events with full type safety:
 
 ```ts
 // Listen to console messages
@@ -147,6 +149,15 @@ session.on('Page.loadEventFired', () => {
 // Listen to execution context events
 session.on('execution-context-created', (context) => {
   console.log('New execution context:', context.id);
+});
+
+// Listen to session lifecycle events
+session.on('session-attached', (newSession, url) => {
+  console.log('New session attached:', newSession.id, url);
+});
+
+session.on('session-detached', (detachedSession, reason) => {
+  console.log('Session detached:', detachedSession.id, reason);
 });
 ```
 
@@ -231,40 +242,21 @@ try {
 
 ## API Reference
 
-### Session Class
+For detailed API documentation, see [API.md](docs/API.md).
 
-#### Methods
+### Quick Reference
 
-- `send<T>(method: string, params?: any): Promise<T>` - Send CDP command
-- `evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>` - Execute function
-- `exposeFunction(name: string, fn: Function, options?: ExposeFunctionOptions): Promise<void>` - Expose function
-- `enableSuperJSON(customize?: (superJSON: SuperJSON) => void): Promise<void>` - Enable SuperJSON
+#### Session Class
+- `send()` - Send CDP commands
+- `evaluate()` - Execute functions in browser context
+- `exposeFunction()` - Expose Node.js functions to browser
+- `setAutoAttach()` - Enable auto target attachment
+- `enableTrackExecutionContexts()` - Enable execution context tracking
 
-#### Properties
-
-- `executionContexts: Map<number, ExecutionContext>` - Available execution contexts
-- `webContents: WebContents` - Associated WebContents
-- `superJSON: SuperJSON` - SuperJSON instance
-
-### ExecutionContext Class
-
-#### Methods
-
-- `evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>` - Execute in specific context
-
-### Attach Function
-
-```ts
-attach(target: WebContents, options?: SessionOptions): Promise<Session>
-
-interface SessionOptions {
-  protocolVersion?: string;
-  trackExecutionContexts?: boolean;
-  autoAttachToRelatedTargets?: boolean | TargetType[];
-}
-
-type TargetType = 'page' | 'iframe' | 'worker' | 'shared_worker' | 'service_worker' | 'worklet' | 'shared_storage_worklet' | 'browser' | 'webview' | 'other' | 'auction_worklet' | 'assistive_technology';
-```
+#### Key Types
+- `SessionWithId` - Session with guaranteed ID
+- `DetachedSession` - Detached session with limited functionality
+- `DetachedSessionWithId` - Detached session with guaranteed ID
 
 ## TypeScript Support
 
@@ -422,20 +414,59 @@ const result = await session.evaluate((data) => {
 
 ISC
 
+## Documentation
+
+- [API Reference](docs/API.md) - Complete API documentation
+- [Changelog](CHANGELOG.md) - Version history and changes
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## Best Practices
+
+### Session Management
+```ts
+// Always check if session is attached before using
+if (session.id) {
+  // Session is attached to a specific target
+  console.log('Session ID:', session.id);
+}
+
+// Use proper cleanup
+process.on('beforeExit', async () => {
+  await session.detach();
+});
+```
+
+### Error Handling
+```ts
+try {
+  const result = await session.evaluate(() => {
+    // Your code here
+  });
+} catch (error) {
+  if (error.message.includes('target closed')) {
+    console.log('Target was closed, session may be detached');
+  } else {
+    console.error('Execution error:', error);
+  }
+}
+```
+
+### Performance Optimization
+```ts
+// Enable SuperJSON preloading for better performance
+const session = await attach(window.webContents, {
+  preloadSuperJSON: true
+});
+
+// Use execution context tracking only when needed
+const session = await attach(window.webContents, {
+  trackExecutionContexts: true
+});
+```
+
 ## Changelog
 
-### v0.3.1
-- Added auto target attachment support
-- Improved execution context tracking
-- Enhanced TypeScript definitions
-- Better error handling and debugging
-
-### v0.3.0
-- Initial release with core CDP functionality
-- SuperJSON integration
-- Function execution and exposure
-- Comprehensive TypeScript support
+See [CHANGELOG.md](CHANGELOG.md) for a detailed list of changes and version history.
