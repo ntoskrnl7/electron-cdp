@@ -1,6 +1,6 @@
 
-import { WebContents, WebFrameMain, webFrameMain } from 'electron';
-import { Session as CDPSession, generateScriptString, SessionOptions, SuperJSON } from '.';
+import { WebContents, webFrameMain, WebFrameMain } from 'electron';
+import { Session as CDPSession, generateScriptString, Session, SessionOptions, SuperJSON } from '.';
 
 declare global {
     // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -48,7 +48,9 @@ declare global {
  * @param options.protocolVersion - The protocol version to use for the CDP session.
  * @param options.preloadSuperJSON - If true, SuperJSON will be loaded into all contexts upfront.
  *                                   If false, SuperJSON will only be loaded during evaluate calls.
- *                                   This can also be a callback function to customize the SuperJSON instance.
+ *                                   This can also be a callback function to customize the SuperJSON instance.  
+ * @param options.trackExecutionContexts - Whether to track Runtime execution context and maintain a map of them in the `executionContexts` property.
+ * @param options.autoAttachToRelatedTargets - Whether to automatically attach to related targets.
  * @returns A promise that resolves with the created CDPSession instance.
  * @throws Will throw an error if a CDP session is already attached to the target.
  */
@@ -68,18 +70,32 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
         promises.push(session.enableSuperJSONPreload(typeof preloadSuperJSON === 'boolean' ? undefined : preloadSuperJSON));
     }
 
-    promises.push(session.send('Page.addScriptToEvaluateOnNewDocument', {
-        runImmediately: true,
-        source: `
-            globalThis.$cdp ??= {};
-            if (globalThis.$cdp.frameId === undefined) {
-                const { promise, resolve } = Promise.withResolvers();
-                globalThis.$cdp.frameId = promise;
-                globalThis.$cdp.frameIdResolve = resolve;
-            }`
-    }));
+    promises.push(defineWebFrameMainProperties(session));
 
-    const initializeFrame = async (frame: WebFrameMain | undefined | null) => {
+    await Promise.all(promises);
+
+    Object.defineProperty(target, 'cdp', { get: () => session });
+
+    return session;
+}
+
+/**
+ * Checks if a CDP session is attached to the target.
+ *
+ * @param target - The WebContents instance to check if a CDP session is attached.
+ * @returns Whether a CDP session is attached to the target.
+ */
+export function isAttached(target: WebContents) {
+    return target.cdp instanceof CDPSession;
+}
+
+/**
+ * Defines the properties of the WebFrameMain instance.
+ *
+ * @param session - The session instance to define the properties of the WebFrameMain instance.
+ */
+async function defineWebFrameMainProperties(session: Session) {
+    const initializeFrame = async (session: Session, frame: WebFrameMain | undefined | null) => {
         if (frame && !frame.isDestroyed()) {
             frame.evaluate = async function <A0, A extends unknown[], R>(this: WebFrameMain, userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> {
                 try {
@@ -113,20 +129,32 @@ export async function attach(target: WebContents, options?: { protocolVersion?: 
         }
     };
 
-    initializeFrame(target.mainFrame);
+    const webContents = session.webContents;
+    initializeFrame(session, webContents.mainFrame);
 
-    target
-        .on('frame-created', async (_, details) => initializeFrame(details.frame))
-        .on('will-frame-navigate', details => initializeFrame(details.frame))
-        .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => initializeFrame(webFrameMain.fromId(frameProcessId, frameRoutingId)));
+    if (webContents.getMaxListeners() <= webContents.listenerCount('frame-created')) {
+        webContents.setMaxListeners(webContents.listenerCount('frame-created') + 1);
+    }
+    if (webContents.getMaxListeners() <= webContents.listenerCount('will-frame-navigate')) {
+        webContents.setMaxListeners(webContents.listenerCount('will-frame-navigate') + 1);
+    }
+    if (webContents.getMaxListeners() <= webContents.listenerCount('did-frame-navigate')) {
+        webContents.setMaxListeners(webContents.listenerCount('did-frame-navigate') + 1);
+    }
+    webContents
+        .on('frame-created', async (_, details) => initializeFrame(session, details.frame))
+        .on('will-frame-navigate', details => initializeFrame(session, details.frame))
+        .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) =>
+            initializeFrame(session, webFrameMain.fromId(frameProcessId, frameRoutingId)));
 
-    await Promise.all(promises);
-
-    Object.defineProperty(target, 'cdp', { get: () => session });
-
-    return session;
-}
-
-export function isAttached(target: WebContents) {
-    return target.cdp instanceof CDPSession;
+    await session.send('Page.addScriptToEvaluateOnNewDocument', {
+        runImmediately: true,
+        source: `
+        globalThis.$cdp ??= {};
+        if (globalThis.$cdp.frameId === undefined) {
+            const { promise, resolve } = Promise.withResolvers();
+            globalThis.$cdp.frameId = promise;
+            globalThis.$cdp.frameIdResolve = resolve;
+        }`
+    });
 }

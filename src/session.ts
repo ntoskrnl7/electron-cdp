@@ -4,7 +4,7 @@
 import EventEmitter from 'events';
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
-import Electron, { WebContents, webFrameMain } from 'electron';
+import Electron, { WebContents, WebFrameMain, webFrameMain } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
 import { registerTypes } from './superJSON';
@@ -56,6 +56,7 @@ export declare type Events = {
     'execution-context-destroyed': [event: Protocol.Runtime.ExecutionContextDestroyedEvent];
     'execution-contexts-cleared': [];
     'session-attached': [session: Session, url: string];
+    'session-detached': [id: Protocol.Target.SessionID, reason: 'detached' | 'destroyed' | 'web-contents detached' | 'web-contents destroyed', session: Session];
 };
 
 /**
@@ -427,12 +428,12 @@ export class Session extends EventEmitter<Events> {
             this.setMaxListeners(this.listenerCount('execution-contexts-cleared') + 1);
         }
         this
-            .on('Runtime.executionContextCreated', ({ context }) => {
+            .prependListener('Runtime.executionContextCreated', ({ context }) => {
                 const ctx = new ExecutionContext(this, context);
                 this.#executionContexts.set(context.id, ctx);
                 this.emit('execution-context-created', ctx);
             })
-            .on('Runtime.executionContextDestroyed', event => {
+            .prependListener('Runtime.executionContextDestroyed', event => {
                 this.emit('execution-context-destroyed', event);
                 this.#executionContexts.delete(event.executionContextId);
                 for (const ctx of this.#executionContexts.values()) {
@@ -441,7 +442,7 @@ export class Session extends EventEmitter<Events> {
                     }
                 }
             })
-            .on('Runtime.executionContextsCleared', () => {
+            .prependListener('Runtime.executionContextsCleared', () => {
                 this.#executionContexts.clear();
                 this.emit('execution-contexts-cleared');
             });
@@ -473,12 +474,46 @@ export class Session extends EventEmitter<Events> {
         if (this.getMaxListeners() <= this.listenerCount('Target.attachedToTarget')) {
             this.setMaxListeners(this.listenerCount('Target.attachedToTarget') + 1);
         }
+        if (this.getMaxListeners() <= this.listenerCount('Target.detachedFromTarget')) {
+            this.setMaxListeners(this.listenerCount('Target.detachedFromTarget') + 1);
+        }
         if (this.getMaxListeners() <= this.listenerCount('Target.targetCreated')) {
             this.setMaxListeners(this.listenerCount('Target.targetCreated') + 1);
         }
+        if (this.getMaxListeners() <= this.listenerCount('Target.targetDestroyed')) {
+            this.setMaxListeners(this.listenerCount('Target.targetDestroyed') + 1);
+        }
+        const attachedSessions = new Map<Protocol.Target.SessionID, Session>();
+
+        if (this.webContents.debugger.getMaxListeners() <= this.webContents.debugger.listenerCount('detached')) {
+            this.webContents.debugger.setMaxListeners(this.webContents.debugger.listenerCount('detached') + 1);
+        }
+        this.webContents.debugger.on('detach', () => {
+            attachedSessions.forEach(session => {
+                if (session.id) {
+                    this.emit('session-detached', session.id, 'web-contents detached', session);
+                }
+            });
+            attachedSessions.clear();
+        });
+
+        if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('destroyed')) {
+            this.webContents.setMaxListeners(this.webContents.listenerCount('destroyed') + 1);
+        }
+        this.webContents.on('destroyed', () => {
+            attachedSessions.forEach(session => {
+                if (session.id) {
+                    this.emit('session-detached', session.id, 'web-contents destroyed', session);
+                }
+            });
+            attachedSessions.clear();
+        });
+
         this
-            .on('Target.attachedToTarget', async ({ sessionId, targetInfo }) => {
+            .prependListener('Target.attachedToTarget', async ({ sessionId, targetInfo }) => {
                 const session = await Session.fromSessionId(this.webContents, sessionId);
+
+                attachedSessions.set(sessionId, session);
 
                 session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
                 if (this.webContents.cdp !== this) {
@@ -490,7 +525,7 @@ export class Session extends EventEmitter<Events> {
                     session.setAutoAttach(options);
                 }
             })
-            .on('Target.targetCreated', async ({ targetInfo }) => {
+            .prependListener('Target.targetCreated', async ({ targetInfo }) => {
                 //
                 // Ignore targets from other browser contexts.
                 //
@@ -505,6 +540,21 @@ export class Session extends EventEmitter<Events> {
                 if (targetInfo.type === 'shared_worker') {
                     await this.send('Target.attachToTarget', { targetId: targetInfo.targetId, flatten: true });
                 }
+            })
+            .prependListener('Target.detachedFromTarget', async ({ sessionId }) => {
+                const session = attachedSessions.get(sessionId);
+                if (session) {
+                    attachedSessions.delete(sessionId);
+                    this.emit('session-detached', sessionId, 'detached', session);
+                }
+            })
+            .prependListener('Target.targetDestroyed', async ({ targetId }) => {
+                attachedSessions.forEach(session => {
+                    if (session.id && session.target.id === targetId) {
+                        attachedSessions.delete(session.id);
+                        this.emit('session-detached', session.id, 'destroyed', session);
+                    }
+                });
             });
 
         await this.send('Target.setAutoAttach', {
@@ -777,6 +827,30 @@ export class Session extends EventEmitter<Events> {
         }
     }
 
+    #patchWebFrameMain(frame: WebFrameMain) {
+        frame.evaluate ??= async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
+            try {
+                if (typeof userGestureOrFn === 'boolean') {
+                    return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
+                } else {
+                    return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
+                }
+            } catch (error) {
+                if (typeof error === 'string') {
+                    let result;
+                    try {
+                        result = this.superJSON.parse(error);
+                    } catch {
+                    }
+                    if (result) {
+                        throw result;
+                    }
+                }
+                throw error;
+            }
+        };
+    }
+
     /**
      * Exposes a function to the browser's global context.
      *
@@ -995,13 +1069,9 @@ export class Session extends EventEmitter<Events> {
                 const { type, sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length)) as InvokeMessage;
                 const frame = frameId ? getWebFrameFromFrameId(frameId) ?? details.frame : details.frame;
 
-                frame.evaluate ??= async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
-                    if (typeof userGestureOrFn === 'boolean') {
-                        return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
-                    } else {
-                        return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
-                    }
-                };
+                if (frame.evaluate === undefined) {
+                    this.#patchWebFrameMain(frame);
+                }
 
                 if (sessionId === this.id) {
                     const target = ((type === 'worker' || type === 'service-worker' || type === 'shared-worker') ? new Session(this.webContents, sessionId) : frame);
@@ -1065,7 +1135,7 @@ export class Session extends EventEmitter<Events> {
 
         if (mode === 'CDP') {
             await this.send('Runtime.addBinding', { name: '$cdp.callback.invoke' });
-            this.on('Runtime.bindingCalled', bindingCalled);
+            this.prependListener('Runtime.bindingCalled', bindingCalled);
         } else {
             if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('console-message')) {
                 this.webContents.setMaxListeners(this.webContents.listenerCount('console-message') + 1);
@@ -1109,7 +1179,7 @@ export class Session extends EventEmitter<Events> {
                 if (this.getMaxListeners() <= this.listenerCount('execution-context-created')) {
                     this.setMaxListeners(this.listenerCount('execution-context-created') + 1);
                 }
-                this.on('execution-context-created', executionContextCreated);
+                this.prependListener('execution-context-created', executionContextCreated);
                 entry = {
                     executionContextCreated,
                     removeHandler
@@ -1117,7 +1187,13 @@ export class Session extends EventEmitter<Events> {
             } else {
                 const frameCreated = async (_: Electron.Event, details: Electron.FrameCreatedDetails) => {
                     try {
-                        details.frame?.evaluate(attachFunction, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
+                        if (!details.frame) {
+                            return;
+                        }
+                        if (details.frame.evaluate === undefined) {
+                            this.#patchWebFrameMain(details.frame);
+                        }
+                        details.frame.evaluate(attachFunction, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
                     } catch (error) {
                         if ((error as Error).message !== 'Cannot find context with specified id') {
                             console.debug(error);
@@ -1197,7 +1273,16 @@ export class Session extends EventEmitter<Events> {
         } else {
             this.webContents.off('frame-created', entry.frameCreated);
         }
-        // @ts-expect-error : globalThis[name]
-        await Promise.allSettled(this.webContents.mainFrame.framesInSubtree.map(frame => frame.evaluate(name => delete globalThis[name], name)).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name))));
+
+        await Promise.allSettled(this.webContents.mainFrame.framesInSubtree.map(frame => {
+            if (frame.evaluate === undefined) {
+                this.#patchWebFrameMain(frame);
+            }
+            // @ts-expect-error : globalThis[name]
+            return frame.evaluate(name => delete globalThis[name], name)
+        }).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => {
+            // @ts-expect-error : globalThis[name]
+            return delete globalThis[name]
+        }, name))));
     }
 }
