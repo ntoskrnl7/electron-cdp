@@ -1,0 +1,85 @@
+name: Publish Package
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        registry-url: 'https://registry.npmjs.org'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run linting
+      run: npm run lint
+    
+    - name: Build package
+      run: npm run build
+    
+    - name: Run tests (if any)
+      run: npm test --if-present
+    
+    - name: Check if version should be published
+      id: should-publish
+      run: |
+        # Get current version from package.json
+        CURRENT_VERSION=$(node -p "require('./package.json').version")
+        echo "Current version: $CURRENT_VERSION"
+        
+        # Check if this is a tag push
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          echo "This is a tag push, will publish"
+          echo "should_publish=true" >> $GITHUB_OUTPUT
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        else
+          # Check if package.json version is higher than latest published
+          LATEST_VERSION=$(npm view ${{ github.repository }} version 2>/dev/null || echo "0.0.0")
+          echo "Latest published version: $LATEST_VERSION"
+          
+          # Compare versions
+          if npm version compare $CURRENT_VERSION $LATEST_VERSION --silent; then
+            echo "Version $CURRENT_VERSION is higher than $LATEST_VERSION, will publish"
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "Version $CURRENT_VERSION is not higher than $LATEST_VERSION, skipping publish"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          fi
+        fi
+    
+    - name: Publish to NPM
+      if: steps.should-publish.outputs.should_publish == 'true'
+      run: npm publish
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    
+    - name: Create GitHub Release
+      if: steps.should-publish.outputs.should_publish == 'true' && startsWith(github.ref, 'refs/tags/')
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ steps.should-publish.outputs.version }}
+        body: |
+          ## Changes in v${{ steps.should-publish.outputs.version }}
+          
+          See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
+        draft: false
+        prerelease: false

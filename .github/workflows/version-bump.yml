@@ -1,0 +1,84 @@
+name: Version Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+        - patch
+        - minor
+        - major
+        - prerelease
+      prerelease_type:
+        description: 'Prerelease type (if version_type is prerelease)'
+        required: false
+        default: 'beta'
+        type: choice
+        options:
+        - alpha
+        - beta
+        - rc
+
+jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Configure Git
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run linting
+      run: npm run lint
+    
+    - name: Build package
+      run: npm run build
+    
+    - name: Bump version
+      run: |
+        if [ "${{ inputs.version_type }}" = "prerelease" ]; then
+          npm version prerelease --preid=${{ inputs.prerelease_type }}
+        else
+          npm version ${{ inputs.version_type }}
+        fi
+    
+    - name: Push changes
+      run: |
+        git push origin main
+        git push origin --tags
+    
+    - name: Create Pull Request
+      if: github.event_name == 'workflow_dispatch'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "chore: bump version to $(node -p "require('./package.json').version")"
+        title: "Version bump to $(node -p "require('./package.json').version")"
+        body: |
+          This PR bumps the version to $(node -p "require('./package.json').version").
+          
+          **Version Type:** ${{ inputs.version_type }}
+          ${{ inputs.version_type == 'prerelease' && format('**Prerelease Type:** {0}', inputs.prerelease_type) || '' }}
+          
+          The version bump will trigger the publish workflow automatically.
+        branch: version-bump-$(node -p "require('./package.json').version")
+        delete-branch: true
