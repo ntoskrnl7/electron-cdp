@@ -52,8 +52,8 @@ jobs:
           LATEST_VERSION=$(npm view electron-cdp-utils version 2>/dev/null || echo "0.0.0")
           echo "Latest published version: $LATEST_VERSION"
           
-          # Compare versions
-          if npm version compare $CURRENT_VERSION $LATEST_VERSION --silent; then
+          # Compare versions using semver
+          if node -e "const semver = require('semver'); process.exit(semver.gt('$CURRENT_VERSION', '$LATEST_VERSION') ? 0 : 1)"; then
             echo "Version $CURRENT_VERSION is higher than $LATEST_VERSION, will publish"
             echo "should_publish=true" >> $GITHUB_OUTPUT
             echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
