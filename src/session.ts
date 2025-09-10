@@ -247,9 +247,13 @@ export interface SetAutoAttachOptions {
 export class Session extends EventEmitter<Events> {
 
     #target?: Target;
+    #targetInfoPr: Promise<Protocol.Target.TargetInfo>;
 
     readonly id?: Protocol.Target.SessionID;
     readonly webContents: WebContents;
+
+    #domains?: Protocol.Schema.Domain[];
+    #domainsPr: Promise<Protocol.Schema.Domain[]>;
 
     #isSuperJSONPreloaded = false;
     #superJSON: SuperJSON;
@@ -257,7 +261,7 @@ export class Session extends EventEmitter<Events> {
 
     readonly #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
 
-    readonly #exposeFunctions: Map<string, ExposeFunction> = new Map();
+    readonly #exposeFunctions: Map<string, ExposeFunction | null> = new Map();
 
     #trackExecutionContextsEnabled = false;
     #autoAttachToRelatedTargetsEnabled = false;
@@ -299,6 +303,29 @@ export class Session extends EventEmitter<Events> {
             throw new Error('target is not yet initialized');
         }
         return this.#target;
+    }
+
+    /**
+     * Gets information about the domains associated with this session.
+     *
+     * @returns Information about the domains associated with this session.
+     */
+    async getDomains() {
+        return this.#domainsPr;
+    }
+
+    /**
+     * Gets the domains associated with this session.
+     *
+     * @throws If the domains is not yet initialized.
+     *
+     * @return The domains associated with this session.
+     */
+    get domains() {
+        if (this.#domains === undefined) {
+            throw new Error('target is not yet initialized');
+        }
+        return this.#domains;
     }
 
     /**
@@ -645,8 +672,14 @@ export class Session extends EventEmitter<Events> {
             webContents.debugger.attach(protocolVersion);
         }
 
-        this.getTargetInfo().then(targetInfo => {
+        this.#targetInfoPr = this.send('Target.getTargetInfo').then(({ targetInfo }) => {
             this.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+            return targetInfo;
+        });
+
+        this.#domainsPr = this.send('Schema.getDomains').then(r => {
+            this.#domains = r.domains;
+            return this.#domains;
         });
 
         if (webContents.debugger.getMaxListeners() <= webContents.debugger.listenerCount('message')) {
@@ -685,7 +718,7 @@ export class Session extends EventEmitter<Events> {
      */
     async send<T extends keyof ProtocolMapping.Commands>(method: T, params?: ProtocolMapping.Commands[T]['paramsType'][0]): Promise<ProtocolMapping.Commands[T]['returnType']> {
         if (!this.webContents.debugger.isAttached()) {
-            throw new Error('not attached');
+            throw new Error(`DevTools debugger is not attached for webContents(id=${this.id}).\nPlease call webContents.debugger.attach() before sending commands.`);
         }
         return await this.webContents.debugger.sendCommand(method, params, this.id);
     }
@@ -1112,100 +1145,256 @@ export class Session extends EventEmitter<Events> {
                     this.#patchWebFrameMain(frame);
                 }
 
-                if (sessionId === this.id) {
-                    const target = ((type === 'worker' || type === 'service-worker' || type === 'shared-worker') ? new Session(this.webContents, sessionId) : frame);
-                    const payload: Payload = this.superJSON.parse(payloadString);
-                    if (payload.name === name) {
-                        const withReturnValue = options?.withReturnValue;
-                        const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
-                        try {
-                            if (options?.retry) {
-                                const { promise, resolve, reject } = Promise.withResolvers<void>();
-                                if (timeout) {
-                                    setTimeout(reject, timeout);
-                                }
-                                await Promise.race([target.evaluate(seq => {
-                                    if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
-                                        globalThis.$cdp.callback.returnValues[seq].init = true;
-                                    }
-                                }, payload.sequence), promise]);
-                                resolve();
-                            }
-                            const ret = await fn(...payload.args);
+                if (sessionId !== this.id) {
+                    return;
+                }
 
-                            if (withReturnValue) {
-                                const { promise, resolve, reject } = Promise.withResolvers<void>();
-                                if (timeout) {
-                                    setTimeout(reject, timeout);
-                                }
-                                await Promise.race([target.evaluate((seq, ret) => {
-                                    if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
-                                        globalThis.$cdp.callback.returnValues[seq].value = ret;
-                                    }
-                                }, payload.sequence, ret), promise]);
-                                resolve();
-                            }
-                        } catch (error) {
-                            if (withReturnValue) {
-                                const { promise, resolve, reject } = Promise.withResolvers<void>();
-                                if (timeout) {
-                                    setTimeout(reject, timeout);
-                                }
-                                try {
-                                    await Promise.race([target.evaluate((seq, error) => {
-                                        if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
-                                            globalThis.$cdp.callback.errors[seq].value = error;
-                                        }
-                                    }, payload.sequence, error), promise]);
-                                } catch (error) {
-                                    if (error instanceof Error) {
-                                        error.message = error.message + `\t(sessionId: ${sessionId})`
-                                        throw new Error(error.message);
-                                    }
-                                    throw error;
-                                }
-                                resolve();
-                            }
+                const target = ((type === 'worker' || type === 'service-worker' || type === 'shared-worker') ? this : frame);
+                const payload: Payload = this.superJSON.parse(payloadString);
+                if (payload.name !== name) {
+                    return;
+                }
+
+                const withReturnValue = options?.withReturnValue;
+                const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
+                try {
+                    if (options?.retry) {
+                        const { promise, resolve, reject } = Promise.withResolvers<void>();
+                        if (timeout) {
+                            setTimeout(reject, timeout);
                         }
+                        await Promise.race([target.evaluate(seq => {
+                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                                globalThis.$cdp.callback.returnValues[seq].init = true;
+                            }
+                        }, payload.sequence), promise]);
+                        resolve();
+                    }
+                    const ret = await fn(...payload.args);
+
+                    if (withReturnValue) {
+                        const { promise, resolve, reject } = Promise.withResolvers<void>();
+                        if (timeout) {
+                            setTimeout(reject, timeout);
+                        }
+                        await Promise.race([target.evaluate((seq, ret) => {
+                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                                globalThis.$cdp.callback.returnValues[seq].value = ret;
+                            }
+                        }, payload.sequence, ret), promise]);
+                        resolve();
+                    }
+                } catch (error) {
+                    if (withReturnValue) {
+                        const { promise, resolve, reject } = Promise.withResolvers<void>();
+                        if (timeout) {
+                            setTimeout(reject, timeout);
+                        }
+                        try {
+                            await Promise.race([target.evaluate((seq, error) => {
+                                if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
+                                    globalThis.$cdp.callback.errors[seq].value = error;
+                                }
+                            }, payload.sequence, error), promise]);
+                        } catch (error) {
+                            if (error instanceof Error) {
+                                error.message = error.message + `\t(sessionId: ${sessionId})`
+                                throw new Error(error.message);
+                            }
+                            throw error;
+                        }
+                        resolve();
                     }
                 }
+
             }
         };
 
+        let removeHandler;
         if (mode === 'CDP') {
             await this.send('Runtime.addBinding', { name: '$cdp.callback.invoke' });
             this.prependListener('Runtime.bindingCalled', bindingCalled);
+            removeHandler = () => { this.off('Runtime.bindingCalled', bindingCalled) };
         } else {
-            if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('console-message')) {
-                this.webContents.setMaxListeners(this.webContents.listenerCount('console-message') + 1);
+            const targetInfo = await this.#targetInfoPr;
+            switch (targetInfo.type as Target['type']) {
+                case 'service_worker': {
+                    const url = (await this.#targetInfoPr).url;
+                    const { promise, resolve } = Promise.withResolvers<string>();
+                    const serviceWorkers = this.webContents.session.serviceWorkers;
+                    if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('running-status-changed')) {
+                        serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('running-status-changed') + 1);
+                    }
+                    const h = setTimeout(() => {
+                        const versionId = Object.entries(this.webContents.session.serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0];
+                        if (versionId !== undefined) {
+                            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
+                            resolve(versionId);
+                        }
+                    }, 1000);
+                    const onRunningStatusChanged = (details: Electron.Event<Electron.ServiceWorkersRunningStatusChangedEventParams>) => {
+                        const versionId = Object.keys(serviceWorkers.getAllRunning()).find(versionId => Number(versionId) === details.versionId);
+                        if (versionId !== undefined) {
+                            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
+                            clearTimeout(h);
+                            resolve(versionId);
+                        }
+                    };
+    
+                    serviceWorkers.on('running-status-changed', onRunningStatusChanged);
+
+                    const versionId: Electron.ServiceWorkerInfo['versionId'] = Number(Object.entries(this.webContents.session.serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0] ?? await promise);
+
+                    const onServiceWorkerConsoleMessage = async (
+                        _event: {
+                            preventDefault: () => void;
+                            readonly defaultPrevented: boolean;
+                        },
+                        messageDetails: globalThis.Electron.MessageDetails
+                    ) => {
+                        if (messageDetails.versionId === versionId && messageDetails.level === 0 && messageDetails.message.startsWith('cdp-utils-')) {
+                            const { type, sessionId, payload: payloadString } = JSON.parse(messageDetails.message.substring('cdp-utils-'.length)) as InvokeMessage;
+
+                            if (type !== 'service-worker' || sessionId !== this.id) {
+                                return;
+                            }
+
+                            const payload: Payload = this.superJSON.parse(payloadString);
+                            if (payload.name === name) {
+                                const withReturnValue = options?.withReturnValue;
+                                const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
+                                try {
+                                    if (options?.retry) {
+                                        const { promise, resolve, reject } = Promise.withResolvers<void>();
+                                        if (timeout) {
+                                            setTimeout(reject, timeout);
+                                        }
+                                        await Promise.race([this.evaluate(seq => {
+                                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                                                globalThis.$cdp.callback.returnValues[seq].init = true;
+                                            }
+                                        }, payload.sequence), promise]);
+                                        resolve();
+                                    }
+                                    const ret = await fn(...payload.args);
+
+                                    if (withReturnValue) {
+                                        const { promise, resolve, reject } = Promise.withResolvers<void>();
+                                        if (timeout) {
+                                            setTimeout(reject, timeout);
+                                        }
+                                        await Promise.race([this.evaluate((seq, ret) => {
+                                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                                                globalThis.$cdp.callback.returnValues[seq].value = ret;
+                                            }
+                                        }, payload.sequence, ret), promise]);
+                                        resolve();
+                                    }
+                                } catch (error) {
+                                    if (withReturnValue) {
+                                        const { promise, resolve, reject } = Promise.withResolvers<void>();
+                                        if (timeout) {
+                                            setTimeout(reject, timeout);
+                                        }
+                                        try {
+                                            await Promise.race([this.evaluate((seq, error) => {
+                                                if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
+                                                    globalThis.$cdp.callback.errors[seq].value = error;
+                                                }
+                                            }, payload.sequence, error), promise]);
+                                        } catch (error) {
+                                            if (error instanceof Error) {
+                                                error.message = error.message + `\t(sessionId: ${sessionId})`
+                                                throw new Error(error.message);
+                                            }
+                                            throw error;
+                                        }
+                                        resolve();
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('console-message')) {
+                        serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('console-message') + 1);
+                    }
+                    serviceWorkers.on('console-message', onServiceWorkerConsoleMessage);
+                    removeHandler = () => { serviceWorkers.off('console-message', onServiceWorkerConsoleMessage) };
+                    break;
+                }
+                case 'page':
+                case 'iframe':
+                case 'worker': {
+                    if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('console-message')) {
+                        this.webContents.setMaxListeners(this.webContents.listenerCount('console-message') + 1);
+                    }
+                    this.webContents.on('console-message', onConsoleMessage);
+                    removeHandler = () => { this.webContents.off('console-message', onConsoleMessage) };
+                    break;
+                }
+                default:
+                    //
+                    // Unsupported Electron target type encountered. 
+                    // Only "service_worker", "page", "iframe", and "worker" are currently handled.
+                    //
+                    throw new Error(`Electron mode does not support target type: ${targetInfo.type}`);
             }
-            this.webContents.on('console-message', onConsoleMessage);
         }
         if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('destroyed')) {
             this.webContents.setMaxListeners(this.webContents.listenerCount('destroyed') + 1);
         }
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
 
-        let entry;
-        const removeHandler = (mode === 'CDP') ? () => this.off('Runtime.bindingCalled', bindingCalled) : () => this.webContents.off('console-message', onConsoleMessage);
-
+        let entry = null;
         try {
-            const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
-                runImmediately: true,
-                source: generateScriptString({ session: this }, attachFunction, name, options, this.id)
-            })).identifier;
-            entry = {
-                scriptId,
-                removeHandler
-            };
+            if ((await this.#domainsPr).find(d => d.name === 'Page')) {
+                const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
+                    runImmediately: true,
+                    source: generateScriptString({ session: this }, attachFunction, name, options, this.id)
+                })).identifier;
+                entry = {
+                    scriptId,
+                    removeHandler
+                };
+            }
         } catch (error) {
-            console.trace(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
+            if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                console.trace(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
+            }
+        }
+
+        /**
+         * Fallback path when Page.addScriptToEvaluateOnNewDocument is not supported or failed:
+         *
+         * - CDP mode:
+         *   Use Runtime.evaluate to inject into all *current* execution contexts,
+         *   and also attach a listener to inject into *future* contexts as they are created.
+         *
+         * - Electron mode (main session only, i.e., this.id === undefined):
+         *   Inject into existing frames immediately, and then hook 'frame-created'
+         *   to inject into newly created frames.
+         */
+        if (!entry) {
             try {
                 await this.evaluate(attachFunction, name, options, this.id);
             } catch (error) {
-                console.error(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
+                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                    console.error(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
+                }
             }
+
+            const promises: Promise<unknown>[] = [];
+
             if (mode === 'CDP') {
+                for (const ctx of this.#executionContexts.values()) {
+                    promises.push(ctx.evaluate(attachFunction, name, options, this.id).catch(error => {
+                        if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                            console.debug(error);
+                        }
+                    }));
+                }
+
                 const executionContextCreated = async (context: ExecutionContext) => {
                     try {
                         await context.evaluate(attachFunction, name, options, this.id);
@@ -1223,7 +1412,18 @@ export class Session extends EventEmitter<Events> {
                     executionContextCreated,
                     removeHandler
                 };
-            } else {
+            } else if (this.id === undefined) {
+                for (const frame of this.webContents.mainFrame.framesInSubtree) {
+                    try {
+                        if (frame.evaluate === undefined) {
+                            this.#patchWebFrameMain(frame);
+                        }
+                        promises.push(frame.evaluate(attachFunction, name, options, this.id, `${frame.processId}-${frame.routingId}`));
+                    } catch (error) {
+                        console.debug(error);
+                    }
+                }
+
                 const frameCreated = async (_: Electron.Event, details: Electron.FrameCreatedDetails) => {
                     try {
                         if (!details.frame) {
@@ -1234,9 +1434,7 @@ export class Session extends EventEmitter<Events> {
                         }
                         details.frame.evaluate(attachFunction, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
                     } catch (error) {
-                        if ((error as Error).message !== 'Cannot find context with specified id') {
-                            console.debug(error);
-                        }
+                        console.debug(error);
                     }
                 };
                 if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('frame-created')) {
@@ -1248,30 +1446,10 @@ export class Session extends EventEmitter<Events> {
                     removeHandler
                 };
             }
+            await Promise.allSettled(promises);
         }
+
         this.#exposeFunctions.set(name, entry);
-
-        const promises = [];
-
-        for (const frame of this.webContents.mainFrame.framesInSubtree) {
-            promises.push(frame.evaluate(attachFunction, name, options, this.id, `${frame.processId}-${frame.routingId}`).catch(console.debug));
-        }
-
-        promises.push(this.evaluate(attachFunction, name, options, this.id).catch(error => {
-            if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                console.debug(error);
-            }
-        }));
-
-        for (const ctx of this.#executionContexts.values()) {
-            promises.push(ctx.evaluate(attachFunction, name, options, this.id).catch(error => {
-                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                    console.debug(error);
-                }
-            }));
-        }
-
-        await Promise.allSettled(promises);
     }
 
     /**
@@ -1285,9 +1463,11 @@ export class Session extends EventEmitter<Events> {
      */
     async removeExposedFunction(name: string) {
         const entry = this.#exposeFunctions.get(name);
-        if (entry) {
+        if (entry !== undefined) {
             this.#exposeFunctions.delete(name);
-            await this.#removeExposedFunction(name, entry);
+            if (entry) {
+                await this.#removeExposedFunction(name, entry);
+            }
             return true;
         }
         return false;
