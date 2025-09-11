@@ -25,6 +25,51 @@ function convertToFunction(code: string) {
 }
 
 /**
+ * Gets the service worker info for a given script URL.
+ * @param serviceWorkers - The service workers instance.
+ * @param scriptURL - The script URL to get the service worker info for.
+ * @param options - The options for getting the service worker info.    
+ * @returns The service worker info.
+ */
+async function getServiceWorkerInfo(serviceWorkers: Electron.ServiceWorkers, scriptURL: string | URL, options?: { timeout: number }) {
+    if (scriptURL instanceof URL) {
+        scriptURL = scriptURL.href;
+    }
+    const { promise, resolve } = Promise.withResolvers<Electron.ServiceWorkerInfo>();
+
+    if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('running-status-changed')) {
+        serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('running-status-changed') + 1);
+    }
+
+    const tryGetInfo = () => {
+        const result = Object.entries(serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === scriptURL);
+        if (result !== undefined) {
+            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
+            result[1].versionId ??= Number(result[0]);
+            resolve(result[1]);
+        }
+    };
+
+    const h = setTimeout(tryGetInfo, options?.timeout ?? 1000);
+
+    const onRunningStatusChanged = () => {
+        const result = Object.entries(serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === scriptURL);
+        if (result !== undefined) {
+            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
+            clearTimeout(h);
+            result[1].versionId ??= Number(result[0]);
+            resolve(result[1]);
+        }
+    };
+
+    serviceWorkers.on('running-status-changed', onRunningStatusChanged);
+
+    tryGetInfo();
+
+    return promise;
+}
+
+/**
  * Stable identifier for an Electron frame composed as `${processId}-${routingId}`.
  * Example: "1234-7"
  */
@@ -82,6 +127,7 @@ export declare type Events = {
     'execution-contexts-cleared': [];
     'session-attached': [session: SessionWithId, url: string];
     'session-detached': [session: DetachedSessionWithId, reason: 'detached' | 'destroyed' | 'web-contents detached' | 'web-contents destroyed'];
+    'service-worker-running-status-changed': [event: { runningStatus: Electron.ServiceWorkersRunningStatusChangedEventParams['runningStatus']; versionId: number }, session: SessionWithId];
 };
 
 /**
@@ -171,9 +217,26 @@ type XOR_<T1, T2> = (T1 | T2) extends object
     : T1 | T2;
 
 type ExposeFunction =
-    XOR<[{ executionContextCreated: (context: ExecutionContext) => Promise<void>; }, { frameCreated: (event: Electron.Event, details: Electron.FrameCreatedDetails) => void }, { scriptId: Protocol.Page.ScriptIdentifier; }]>
-    &
-    { removeHandler: () => void };
+    (XOR<[
+        {
+            executionContextCreated: (context: ExecutionContext) => Promise<void>;
+        },
+        {
+            frameCreated: (event: Electron.Event, details: Electron.FrameCreatedDetails) => void
+        },
+        {
+            scriptId: Protocol.Page.ScriptIdentifier;
+        }
+    ]>
+        &
+    {
+        exposeFunction: () => void,
+        removeHandler: () => void
+    }) |
+    {
+        exposeFunction: () => void,
+    };
+
 export interface Target extends Omit<Protocol.Target.TargetInfo, 'url' | 'title' | 'type' | 'targetId'> {
     /**
      * Type of target.
@@ -261,7 +324,7 @@ export class Session extends EventEmitter<Events> {
 
     readonly #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
 
-    readonly #exposeFunctions: Map<string, ExposeFunction | null> = new Map();
+    readonly #exposeFunctions: Map<string, ExposeFunction> = new Map();
 
     #trackExecutionContextsEnabled = false;
     #autoAttachToRelatedTargetsEnabled = false;
@@ -590,6 +653,21 @@ export class Session extends EventEmitter<Events> {
                 if (options?.recursive) {
                     session.setAutoAttach(options);
                 }
+
+                if (targetInfo.type === 'service_worker') {
+                    const serviceWorkers = this.webContents.session.serviceWorkers;
+                    const { versionId } = await getServiceWorkerInfo(serviceWorkers, targetInfo.url);
+                    if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('running-status-changed')) {
+                        serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('running-status-changed') + 1);
+                    }
+                    serviceWorkers.on('running-status-changed', event => {
+                        if (versionId !== event.versionId) return;
+                        if (this.webContents.cdp !== this) {
+                            this.webContents.cdp?.emit?.('service-worker-running-status-changed', { runningStatus: event.runningStatus, versionId: event.versionId }, session);
+                        }
+                        session.emit('service-worker-running-status-changed', { runningStatus: event.runningStatus, versionId: event.versionId }, session);
+                    });
+                }
             })
             .prependListener('Target.targetCreated', async ({ targetInfo }) => {
                 //
@@ -674,6 +752,23 @@ export class Session extends EventEmitter<Events> {
 
         this.#targetInfoPr = this.send('Target.getTargetInfo').then(({ targetInfo }) => {
             this.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+
+            if (this.#target.type === 'service_worker') {
+                try {
+                    if (this.getMaxListeners() <= this.listenerCount('service-worker-running-status-changed')) {
+                        this.setMaxListeners(this.listenerCount('service-worker-running-status-changed') + 1);
+                    }
+                    this.on('service-worker-running-status-changed', (event, session) => {
+                        if (session.id !== this.id) return;
+                        if (event.runningStatus === 'starting') {
+                            for (const exposeFunction of this.#exposeFunctions.values()) {
+                                exposeFunction.exposeFunction();
+                            }
+                        }
+                    });
+                } catch {
+                }
+            }
             return targetInfo;
         });
 
@@ -931,6 +1026,7 @@ export class Session extends EventEmitter<Events> {
      * @param options - Options for exposing the function.
      */
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
+
         const attachFunction = (name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
             // @ts-expect-error : ignore
             globalThis.$cdp ??= { callback: {} };
@@ -1226,7 +1322,7 @@ export class Session extends EventEmitter<Events> {
                         serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('running-status-changed') + 1);
                     }
                     const h = setTimeout(() => {
-                        const versionId = Object.entries(this.webContents.session.serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0];
+                        const versionId = Object.entries(serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0];
                         if (versionId !== undefined) {
                             serviceWorkers.off('running-status-changed', onRunningStatusChanged);
                             resolve(versionId);
@@ -1240,10 +1336,10 @@ export class Session extends EventEmitter<Events> {
                             resolve(versionId);
                         }
                     };
-    
+
                     serviceWorkers.on('running-status-changed', onRunningStatusChanged);
 
-                    const versionId: Electron.ServiceWorkerInfo['versionId'] = Number(Object.entries(this.webContents.session.serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0] ?? await promise);
+                    const versionId: Electron.ServiceWorkerInfo['versionId'] = Number(Object.entries(serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0] ?? await promise);
 
                     const onServiceWorkerConsoleMessage = async (
                         _event: {
@@ -1346,7 +1442,7 @@ export class Session extends EventEmitter<Events> {
         }
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
 
-        let entry = null;
+        let entry;
         try {
             if ((await this.#domainsPr).find(d => d.name === 'Page')) {
                 const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
@@ -1355,6 +1451,9 @@ export class Session extends EventEmitter<Events> {
                 })).identifier;
                 entry = {
                     scriptId,
+                    exposeFunction: () => {
+                        return this.exposeFunction(name, fn, options);
+                    },
                     removeHandler
                 };
             }
@@ -1410,6 +1509,9 @@ export class Session extends EventEmitter<Events> {
                 this.prependListener('execution-context-created', executionContextCreated);
                 entry = {
                     executionContextCreated,
+                    exposeFunction: () => {
+                        return this.exposeFunction(name, fn, options);
+                    },
                     removeHandler
                 };
             } else if (this.id === undefined) {
@@ -1443,10 +1545,22 @@ export class Session extends EventEmitter<Events> {
                 this.webContents.on('frame-created', frameCreated);
                 entry = {
                     frameCreated,
+                    exposeFunction: () => {
+                        return this.exposeFunction(name, fn, options);
+                    },
                     removeHandler
                 };
             }
             await Promise.allSettled(promises);
+        }
+
+        if (!entry) {
+            entry = {
+                exposeFunction: () => {
+                    return this.exposeFunction(name, fn, options);
+                },
+                removeHandler
+            };
         }
 
         this.#exposeFunctions.set(name, entry);
@@ -1484,24 +1598,35 @@ export class Session extends EventEmitter<Events> {
     }
 
     async #removeExposedFunction(name: string, entry: ExposeFunction) {
-        entry.removeHandler();
+        if ('removeHandler' in entry) {
+            entry.removeHandler?.();
+        }
+
         if ('scriptId' in entry) {
             await this.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.scriptId });
         } else if ('executionContextCreated' in entry) {
             this.off('execution-context-created', entry.executionContextCreated);
-        } else {
+        } else if ('frameCreated' in entry) {
             this.webContents.off('frame-created', entry.frameCreated);
         }
 
-        await Promise.allSettled(this.webContents.mainFrame.framesInSubtree.map(frame => {
-            if (frame.evaluate === undefined) {
-                this.#patchWebFrameMain(frame);
-            }
-            // @ts-expect-error : globalThis[name]
-            return frame.evaluate(name => delete globalThis[name], name)
-        }).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => {
-            // @ts-expect-error : globalThis[name]
-            return delete globalThis[name]
-        }, name))));
+        const promises = [];
+        if (this.target.type === 'page' || this.target.type === 'iframe') {
+            promises.push(this.webContents.mainFrame.framesInSubtree.map(frame => {
+                if (frame.evaluate === undefined) {
+                    this.#patchWebFrameMain(frame);
+                }
+                // @ts-expect-error : globalThis[name]
+                return frame.evaluate(name => delete globalThis[name], name);
+            }));
+        }
+
+        // @ts-expect-error : globalThis[name]
+        promises.push(this.evaluate(name => delete globalThis[name], name));
+
+        // @ts-expect-error : globalThis[name]
+        promises.push(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name)));
+
+        await Promise.allSettled(promises);
     }
 }
