@@ -25,51 +25,6 @@ function convertToFunction(code: string) {
 }
 
 /**
- * Gets the service worker info for a given script URL.
- * @param serviceWorkers - The service workers instance.
- * @param scriptURL - The script URL to get the service worker info for.
- * @param options - The options for getting the service worker info.    
- * @returns The service worker info.
- */
-async function getServiceWorkerInfo(serviceWorkers: Electron.ServiceWorkers, scriptURL: string | URL, options?: { timeout: number }) {
-    if (scriptURL instanceof URL) {
-        scriptURL = scriptURL.href;
-    }
-    const { promise, resolve } = Promise.withResolvers<Electron.ServiceWorkerInfo>();
-
-    if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('running-status-changed')) {
-        serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('running-status-changed') + 1);
-    }
-
-    const tryGetInfo = () => {
-        const result = Object.entries(serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === scriptURL);
-        if (result !== undefined) {
-            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
-            result[1].versionId ??= Number(result[0]);
-            resolve(result[1]);
-        }
-    };
-
-    const h = setTimeout(tryGetInfo, options?.timeout ?? 1000);
-
-    const onRunningStatusChanged = () => {
-        const result = Object.entries(serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === scriptURL);
-        if (result !== undefined) {
-            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
-            clearTimeout(h);
-            result[1].versionId ??= Number(result[0]);
-            resolve(result[1]);
-        }
-    };
-
-    serviceWorkers.on('running-status-changed', onRunningStatusChanged);
-
-    tryGetInfo();
-
-    return promise;
-}
-
-/**
  * Stable identifier for an Electron frame composed as `${processId}-${routingId}`.
  * Example: "1234-7"
  */
@@ -127,7 +82,7 @@ export declare type Events = {
     'execution-contexts-cleared': [];
     'session-attached': [session: SessionWithId, url: string];
     'session-detached': [session: DetachedSessionWithId, reason: 'detached' | 'destroyed' | 'web-contents detached' | 'web-contents destroyed'];
-    'service-worker-running-status-changed': [event: { runningStatus: Electron.ServiceWorkersRunningStatusChangedEventParams['runningStatus']; versionId: number }, session: SessionWithId];
+    'service-worker-running-status-changed': [event: { runningStatus: Protocol.ServiceWorker.ServiceWorkerVersionRunningStatus; versionId: number }, session: SessionWithId];
 };
 
 /**
@@ -582,6 +537,98 @@ export class Session extends EventEmitter<Events> {
     }
 
     /**
+     * Alias for `on(eventName, listener)`.
+     */
+    addListener<K>(eventName: keyof Events | K, listener: K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => void : never : never, signal?: AbortSignal): this {
+        if (signal) {
+            signal.addEventListener('abort', () => {
+                this.removeListener(eventName, listener);
+            });
+        }
+        return super.addListener(eventName, listener);
+    }
+
+    /**
+     * Adds the `listener` function to the end of the listeners array for the event
+     * named `eventName`. No checks are made to see if the `listener` has already
+     * been added. Multiple calls passing the same combination of `eventName` and
+     * `listener` will result in the `listener` being added, and called, multiple times.
+     *
+     * ```js
+     * const controller = new AbortController();
+     * 
+     * server.on('connection', (stream) => {
+     *   console.log('someone connected!');
+     * }, controller.signal);
+     * 
+     * setTimeout(() => {
+     *   controller.abort();
+     * }, 1000);
+     * ```
+     *
+     * Returns a reference to the `EventEmitter`, so that calls can be chained.
+     *
+     * By default, event listeners are invoked in the order they are added. The `emitter.prependListener()` method can be used as an alternative to add the
+     * event listener to the beginning of the listeners array.
+     *
+     * ```js
+     * import { EventEmitter } from 'node:events';
+     * const myEE = new EventEmitter();
+     * myEE.on('foo', () => console.log('a'));
+     * myEE.prependListener('foo', () => console.log('b'));
+     * myEE.emit('foo');
+     * // Prints:
+     * //   b
+     * //   a
+     * ```
+     * @since v0.1.101
+     * @param eventName The name of the event.
+     * @param listener The callback function
+     */
+    on<K>(eventName: keyof Events | K, listener: K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => void : never : never, signal?: AbortSignal): this {
+        if (signal) {
+            signal.addEventListener('abort', () => {
+                this.off(eventName, listener);
+            });
+        }
+        return super.on(eventName, listener);
+    }
+
+    /**
+     * Adds the `listener` function to the _beginning_ of the listeners array for the
+     * event named `eventName`. No checks are made to see if the `listener` has
+     * already been added. Multiple calls passing the same combination of `eventName`
+     * and `listener` will result in the `listener` being added, and called, multiple times.
+     *
+     * ```js
+     * const controller = new AbortController();
+     * 
+     * server.prependListener('connection', (stream) => {
+     *   console.log('someone connected!');
+     * }, controller.signal);
+     * 
+     * setTimeout(() => {
+     *   controller.abort();
+     * }, 1000);
+     * ```
+     *
+     * Returns a reference to the `EventEmitter`, so that calls can be chained.
+     * @since v6.0.0
+     * @param eventName The name of the event.
+     * @param listener The callback function
+     * @param signal An optional signal to abort the listener.
+     * @returns The session instance.
+     */
+    prependListener<K>(eventName: keyof Events | K, listener: K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => void : never : never, signal?: AbortSignal): this {
+        if (signal) {
+            signal.addEventListener('abort', () => {
+                this.removeListener(eventName, listener);
+            });
+        }
+        return super.prependListener(eventName, listener);
+    }
+
+    /**
      *  Enables automatic attachment to related targets such as iframes and workers.
      *
      *  When enabled, the session will listen for target lifecycle events and automatically attach to new targets of the specified types.
@@ -655,8 +702,25 @@ export class Session extends EventEmitter<Events> {
                 }
 
                 if (targetInfo.type === 'service_worker') {
+
+                    const { promise, resolve } = Promise.withResolvers<number>();
+
+                    const controller = new AbortController();
+
+                    if (this.getMaxListeners() <= this.listenerCount('ServiceWorker.workerVersionUpdated')) {
+                        this.setMaxListeners(this.listenerCount('ServiceWorker.workerVersionUpdated') + 1);
+                    }
+                    await this.prependListener('ServiceWorker.workerVersionUpdated', event => {
+                        const version = event.versions.find(version => version.targetId === targetInfo.targetId);
+                        if (version) {
+                            controller.abort();
+                            resolve(Number(version.versionId));
+                        }
+                    }, controller.signal).send('ServiceWorker.enable');
+
+                    const versionId = await promise;
+
                     const serviceWorkers = this.webContents.session.serviceWorkers;
-                    const { versionId } = await getServiceWorkerInfo(serviceWorkers, targetInfo.url);
                     if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('running-status-changed')) {
                         serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('running-status-changed') + 1);
                     }
@@ -665,6 +729,7 @@ export class Session extends EventEmitter<Events> {
                         if (this.webContents.cdp !== this) {
                             this.webContents.cdp?.emit?.('service-worker-running-status-changed', { runningStatus: event.runningStatus, versionId: event.versionId }, session);
                         }
+                        this.emit('service-worker-running-status-changed', { runningStatus: event.runningStatus, versionId: event.versionId }, session);
                         session.emit('service-worker-running-status-changed', { runningStatus: event.runningStatus, versionId: event.versionId }, session);
                     });
                 }
@@ -699,7 +764,7 @@ export class Session extends EventEmitter<Events> {
                         this.emit('session-detached', session, 'destroyed');
                     }
                 });
-            });
+            })
 
         await this.send('Target.setAutoAttach', {
             autoAttach: true,
