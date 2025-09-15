@@ -39,24 +39,20 @@ const window = new BrowserWindow({
   }
 });
 
-// Attach CDP functionality
-const session = await attach(window.webContents);
+// Attach CDP functionality and get MainSession instance
+const session = attach(window.webContents, '1.3');
+
+// Setup the session with advanced options
+await session.setup({
+  preloadSuperJSON: true,
+  trackExecutionContexts: true,
+  autoAttachToRelatedTargets: ['page', 'iframe', 'worker']
+});
 
 // Use CDP commands
 await session.send('Page.enable');
 await session.send('Page.setBypassCSP', { enabled: true });
 await session.send('Runtime.enable');
-```
-
-### Advanced Configuration
-
-```ts
-// Attach with advanced options
-const session = await attach(window.webContents, {
-  protocolVersion: '1.3',
-  trackExecutionContexts: true,
-  autoAttachToRelatedTargets: ['page', 'iframe', 'worker']
-});
 ```
 
 ### Using the Convenient WebContents Extension
@@ -65,31 +61,85 @@ const session = await attach(window.webContents, {
 import { attach } from 'electron-cdp-utils';
 
 const window = new BrowserWindow({...});
-await attach(window.webContents);
+
+// Attach and setup in one go
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  preloadSuperJSON: true,
+  trackExecutionContexts: true
+});
 
 // Now you can use the convenient cdp property
 await window.webContents.cdp.send('Page.enable');
 await window.webContents.cdp.send('Page.setBypassCSP', { enabled: true });
 ```
 
+### MainSession Class
+
+The `MainSession` class extends the base `Session` class with additional setup capabilities:
+
+```ts
+import { MainSession } from 'electron-cdp-utils';
+
+// Create MainSession directly
+const session = new MainSession(window.webContents, undefined, '1.3');
+
+// Setup with options
+await session.setup({
+  preloadSuperJSON: (superJSON) => {
+    // Customize SuperJSON instance
+    superJSON.registerCustom({
+      isApplicable: (v) => v instanceof MyCustomClass,
+      serialize: (v) => v.toJSON(),
+      deserialize: (v) => MyCustomClass.fromJSON(v)
+    });
+  },
+  trackExecutionContexts: true,
+  autoAttachToRelatedTargets: true
+});
+```
+
 ## Core Concepts
 
 ### Session Management
 
-The `Session` class is the main interface for CDP communication:
+The library provides two main session classes:
 
+#### Base Session Class
 ```ts
 import { Session } from 'electron-cdp-utils';
 
-// Create a session directly
-const session = new Session(window.webContents);
+// Create a base session directly
+const session = new Session(window.webContents, sessionId, protocolVersion);
 
-// Or use the attach function for enhanced functionality
-const session = await attach(window.webContents, {
-  protocolVersion: '1.3',
-  preloadSuperJSON: true
+// Use for specific targets (iframes, workers, etc.)
+const iframeSession = await Session.fromTargetId(webContents, targetId);
+```
+
+#### MainSession Class
+```ts
+import { MainSession, attach } from 'electron-cdp-utils';
+
+// Create MainSession directly
+const session = new MainSession(window.webContents, undefined, '1.3');
+await session.setup({
+  preloadSuperJSON: true,
+  trackExecutionContexts: true
+});
+
+// Or use the convenient attach function
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  preloadSuperJSON: true,
+  trackExecutionContexts: true
 });
 ```
+
+#### Key Differences
+
+- **Session**: Base class for all CDP communication, used for specific targets
+- **MainSession**: Extended class with setup capabilities, used for main WebContents
+- **attach()**: Convenient factory function that returns a MainSession instance
 
 ### Function Execution
 
@@ -187,6 +237,61 @@ await session.exposeFunction('complexOperation', async (data: any) => {
 
 ## Advanced Features
 
+### MainSession Setup Options
+
+The `MainSession.setup()` method provides comprehensive configuration:
+
+```ts
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  // SuperJSON configuration
+  preloadSuperJSON: true, // or a custom function
+  preloadSuperJSON: (superJSON) => {
+    // Customize SuperJSON instance
+    superJSON.registerCustom({
+      isApplicable: (v) => v instanceof MyClass,
+      serialize: (v) => v.toJSON(),
+      deserialize: (v) => MyClass.fromJSON(v)
+    });
+  },
+  
+  // Execution context tracking
+  trackExecutionContexts: true,
+  
+  // Auto target attachment
+  autoAttachToRelatedTargets: true, // all targets
+  autoAttachToRelatedTargets: ['iframe', 'worker', 'service_worker'], // specific types
+});
+```
+
+### Service Worker Support
+
+Enhanced service worker support with automatic event handling:
+
+```ts
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  autoAttachToRelatedTargets: ['service_worker']
+});
+
+// Listen for service worker events
+session.on('service-worker-running-status-changed', (event, session) => {
+  console.log('Service worker status:', event.runningStatus);
+  console.log('Version ID:', event.versionId);
+});
+
+session.on('service-worker-version-updated', (version, session) => {
+  console.log('Service worker updated:', version.versionId);
+  console.log('Scope URL:', version.scopeURL);
+});
+
+// Expose functions to service workers
+await session.exposeFunction('serviceWorkerFunction', (data) => {
+  console.log('Called from service worker:', data);
+  return { processed: true, timestamp: new Date() };
+});
+```
+
 ### SuperJSON Integration
 
 The library includes SuperJSON for advanced serialization:
@@ -246,17 +351,28 @@ For detailed API documentation, see [API.md](docs/API.md).
 
 ### Quick Reference
 
-#### Session Class
+#### MainSession Class
+- `setup()` - Configure session with options
 - `send()` - Send CDP commands
 - `evaluate()` - Execute functions in browser context
 - `exposeFunction()` - Expose Node.js functions to browser
 - `setAutoAttach()` - Enable auto target attachment
 - `enableTrackExecutionContexts()` - Enable execution context tracking
 
+#### Session Class (Base)
+- `send()` - Send CDP commands
+- `evaluate()` - Execute functions in browser context
+- `exposeFunction()` - Expose Node.js functions to browser
+- `fromTargetId()` - Create session from target ID
+- `fromTargetInfo()` - Create session from target info
+- `fromSessionId()` - Create session from session ID
+
 #### Key Types
 - `SessionWithId` - Session with guaranteed ID
 - `DetachedSession` - Detached session with limited functionality
 - `DetachedSessionWithId` - Detached session with guaranteed ID
+- `ServiceWorkerVersion` - Enhanced service worker version with scope URL
+- `Target` - Target information with initial URL
 
 ## TypeScript Support
 
@@ -276,19 +392,26 @@ const result: Protocol.Runtime.EvaluateResponse = await session.send('Runtime.ev
 The library can automatically attach to related targets like iframes and workers:
 
 ```ts
-// Enable auto attachment to all related targets
-const session = await attach(window.webContents, {
+// Create and setup session with auto attachment
+const session = attach(window.webContents, '1.3');
+await session.setup({
   autoAttachToRelatedTargets: true
 });
 
 // Or specify target types
-const session = await attach(window.webContents, {
-  autoAttachToRelatedTargets: ['iframe', 'worker', 'shared_worker']
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  autoAttachToRelatedTargets: ['iframe', 'worker', 'shared_worker', 'service_worker']
 });
 
 // Listen for new sessions
-session.on('session-attached', (newSession) => {
-  console.log('New target attached:', newSession.target);
+session.on('session-attached', (newSession, url) => {
+  console.log('New target attached:', newSession.target.type, url);
+});
+
+// Listen for service worker events
+session.on('service-worker-running-status-changed', (event, session) => {
+  console.log('Service worker status changed:', event.runningStatus);
 });
 ```
 
@@ -297,7 +420,8 @@ session.on('session-attached', (newSession) => {
 Monitor execution contexts in real-time:
 
 ```ts
-const session = await attach(window.webContents, {
+const session = attach(window.webContents, '1.3');
+await session.setup({
   trackExecutionContexts: true
 });
 
@@ -312,6 +436,10 @@ session.on('execution-context-created', (context) => {
 session.on('execution-context-destroyed', (contextId) => {
   console.log('Context destroyed:', contextId);
 });
+
+session.on('execution-contexts-cleared', () => {
+  console.log('All execution contexts cleared');
+});
 ```
 
 ## Common Use Cases
@@ -319,18 +447,30 @@ session.on('execution-context-destroyed', (contextId) => {
 ### Web Scraping
 
 ```ts
-const session = await attach(window.webContents);
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  preloadSuperJSON: true,
+  trackExecutionContexts: true
+});
 
 // Navigate to page
 await session.send('Page.navigate', { url: 'https://example.com' });
 await session.send('Page.loadEventFired');
 
-// Extract data
+// Extract data with complex types
 const data = await session.evaluate(() => {
   return {
     title: document.title,
-    links: Array.from(document.querySelectorAll('a')).map(a => a.href),
-    images: Array.from(document.querySelectorAll('img')).map(img => img.src)
+    links: Array.from(document.querySelectorAll('a')).map(a => ({
+      href: a.href,
+      text: a.textContent,
+      timestamp: new Date()
+    })),
+    images: Array.from(document.querySelectorAll('img')).map(img => ({
+      src: img.src,
+      alt: img.alt,
+      dimensions: { width: img.width, height: img.height }
+    }))
   };
 });
 ```
@@ -338,23 +478,43 @@ const data = await session.evaluate(() => {
 ### Testing and Automation
 
 ```ts
-const session = await attach(window.webContents);
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  preloadSuperJSON: true,
+  autoAttachToRelatedTargets: true
+});
 
-// Fill form
-await session.evaluate((formData) => {
-  document.querySelector('#username').value = formData.username;
-  document.querySelector('#password').value = formData.password;
+// Fill form with complex data
+const formData = {
+  username: 'test',
+  password: 'secret',
+  preferences: new Map([['theme', 'dark'], ['notifications', true]]),
+  lastLogin: new Date()
+};
+
+await session.evaluate((data) => {
+  document.querySelector('#username').value = data.username;
+  document.querySelector('#password').value = data.password;
+  document.querySelector('#preferences').value = JSON.stringify(data.preferences);
   document.querySelector('#login-form').submit();
-}, { username: 'test', password: 'secret' });
+}, formData);
 
-// Wait for navigation
-await session.send('Page.navigate', { url: 'https://app.example.com/dashboard' });
+// Wait for navigation and handle iframes
+session.on('session-attached', (newSession) => {
+  if (newSession.target.type === 'iframe') {
+    console.log('Iframe detected:', newSession.target.initialURL);
+  }
+});
 ```
 
 ### Performance Monitoring
 
 ```ts
-const session = await attach(window.webContents);
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  trackExecutionContexts: true,
+  autoAttachToRelatedTargets: ['worker', 'service_worker']
+});
 
 // Enable performance monitoring
 await session.send('Performance.enable');
@@ -365,12 +525,20 @@ session.on('Performance.metrics', (params) => {
   console.log('Performance metrics:', params.metrics);
 });
 
-// Get memory usage
+// Monitor service worker performance
+session.on('service-worker-running-status-changed', (event, session) => {
+  console.log('Service worker status:', event.runningStatus);
+});
+
+// Get memory usage with complex data
 const memory = await session.evaluate(() => {
+  const memInfo = performance.memory;
   return {
-    used: performance.memory.usedJSHeapSize,
-    total: performance.memory.totalJSHeapSize,
-    limit: performance.memory.jsHeapSizeLimit
+    used: memInfo.usedJSHeapSize,
+    total: memInfo.totalJSHeapSize,
+    limit: memInfo.jsHeapSizeLimit,
+    timestamp: new Date(),
+    contexts: Array.from(document.querySelectorAll('iframe')).length
   };
 });
 ```
@@ -457,13 +625,28 @@ try {
 ### Performance Optimization
 ```ts
 // Enable SuperJSON preloading for better performance
-const session = await attach(window.webContents, {
+const session = attach(window.webContents, '1.3');
+await session.setup({
   preloadSuperJSON: true
 });
 
 // Use execution context tracking only when needed
-const session = await attach(window.webContents, {
+const session = attach(window.webContents, '1.3');
+await session.setup({
   trackExecutionContexts: true
+});
+
+// Customize SuperJSON for better serialization
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  preloadSuperJSON: (superJSON) => {
+    // Register custom transformers for your data types
+    superJSON.registerCustom({
+      isApplicable: (v) => v instanceof MyCustomClass,
+      serialize: (v) => v.toJSON(),
+      deserialize: (v) => MyCustomClass.fromJSON(v)
+    });
+  }
 });
 ```
 

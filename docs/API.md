@@ -4,16 +4,65 @@ This document provides a comprehensive reference for all public APIs in electron
 
 ## Table of Contents
 
+- [MainSession Class](#mainsession-class)
 - [Session Class](#session-class)
 - [ExecutionContext Class](#executioncontext-class)
 - [Attach Function](#attach-function)
+- [Utility Functions](#utility-functions)
 - [Type Definitions](#type-definitions)
 - [Interfaces](#interfaces)
 - [Events](#events)
 
+## MainSession Class
+
+The main interface for CDP communication with enhanced setup capabilities. Extends the base `Session` class.
+
+### Constructor
+
+```ts
+constructor(webContents: WebContents, sessionId?: Protocol.Target.SessionID, protocolVersion?: string)
+```
+
+Creates a new MainSession instance bound to a specific WebContents.
+
+### Methods
+
+#### `setup(options?: MainSessionSetupOptions): Promise<void>`
+
+Configures the session with comprehensive options.
+
+**Parameters:**
+- `options` - Optional configuration options for the session
+
+**Options:**
+- `preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void)` - SuperJSON configuration
+- `trackExecutionContexts?: boolean` - Enable execution context tracking
+- `autoAttachToRelatedTargets?: boolean | TargetType[]` - Auto attachment configuration
+
+**Behavior:**
+- Sets up WebFrameMain integration
+- Configures SuperJSON preloading if enabled
+- Enables execution context tracking if specified
+- Sets up auto target attachment if specified
+- Injects global scripts for frame communication
+
+**Example:**
+```ts
+const session = new MainSession(window.webContents, undefined, '1.3');
+await session.setup({
+  preloadSuperJSON: true,
+  trackExecutionContexts: true,
+  autoAttachToRelatedTargets: ['iframe', 'worker', 'service_worker']
+});
+```
+
+### Properties
+
+Inherits all properties from the base `Session` class.
+
 ## Session Class
 
-The main interface for CDP communication.
+The base interface for CDP communication.
 
 ### Constructor
 
@@ -372,24 +421,60 @@ The description of the execution context.
 ## Attach Function
 
 ```ts
-attach(target: WebContents, options?: SessionOptions): Promise<Session>
+attach(target: WebContents, protocolVersion?: string): MainSession
 ```
 
-Attaches CDP functionality to a WebContents instance.
+Attaches CDP functionality to a WebContents instance and returns a MainSession.
 
 **Parameters:**
 - `target` - The WebContents instance to attach to
-- `options` - Optional configuration options
+- `protocolVersion` - Optional CDP protocol version (default: latest)
 
-**Returns:** Promise that resolves with the created Session instance
+**Returns:** MainSession instance ready for configuration
+
+**Behavior:**
+- Creates a new MainSession instance
+- Attaches the session to the WebContents
+- Sets up the `webContents.cdp` property for convenient access
+- Throws error if a session is already attached
 
 **Example:**
 ```ts
-const session = await attach(window.webContents, {
-  protocolVersion: '1.3',
+// Basic usage
+const session = attach(window.webContents, '1.3');
+await session.setup({
+  preloadSuperJSON: true,
   trackExecutionContexts: true,
   autoAttachToRelatedTargets: ['page', 'iframe', 'worker']
 });
+
+// Using the convenient cdp property
+await window.webContents.cdp.send('Page.enable');
+```
+
+## Utility Functions
+
+### `isAttached`
+
+```ts
+isAttached(target: WebContents): boolean
+```
+
+Checks if a CDP session is already attached to the WebContents.
+
+**Parameters:**
+- `target` - The WebContents instance to check
+
+**Returns:** `true` if a session is attached, `false` otherwise
+
+**Example:**
+```ts
+if (isAttached(window.webContents)) {
+  console.log('CDP session already attached');
+} else {
+  const session = attach(window.webContents, '1.3');
+  await session.setup();
+}
 ```
 
 ## Type Definitions
@@ -437,6 +522,18 @@ type FrameId = `${number}-${number}`;
 ```
 
 ## Interfaces
+
+### `MainSessionSetupOptions`
+
+Options for setting up a MainSession.
+
+```ts
+interface MainSessionSetupOptions {
+  preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void);
+  trackExecutionContexts?: boolean;
+  autoAttachToRelatedTargets?: boolean | TargetType[];
+}
+```
 
 ### `SessionOptions`
 
@@ -526,13 +623,24 @@ interface RetryOptions {
 
 ### `Target`
 
-Target information.
+Target information with enhanced properties.
 
 ```ts
 interface Target extends Omit<Protocol.Target.TargetInfo, 'url' | 'title' | 'type' | 'targetId'> {
   type: 'tab' | 'page' | 'iframe' | 'worker' | 'shared_worker' | 'service_worker' | 'worklet' | 'shared_storage_worklet' | 'browser' | 'webview' | 'other' | 'auction_worklet' | 'assistive_technology';
   id: Protocol.Target.TargetID;
+  initialURL: string;
 }
+```
+
+### `ServiceWorkerVersion`
+
+Enhanced service worker version with scope URL information.
+
+```ts
+type ServiceWorkerVersion = Protocol.ServiceWorker.ServiceWorkerVersion & { 
+  scopeURL?: string 
+};
 ```
 
 ## Events
@@ -602,6 +710,28 @@ Emitted when all execution contexts are cleared.
 ```ts
 session.on('execution-contexts-cleared', () => {
   console.log('All execution contexts cleared');
+});
+```
+
+#### `service-worker-running-status-changed`
+
+Emitted when a service worker's running status changes.
+
+```ts
+session.on('service-worker-running-status-changed', (event: { runningStatus: string; versionId: number }, session: SessionWithId) => {
+  console.log('Service worker status changed:', event.runningStatus);
+  console.log('Version ID:', event.versionId);
+});
+```
+
+#### `service-worker-version-updated`
+
+Emitted when a service worker version is updated.
+
+```ts
+session.on('service-worker-version-updated', (version: ServiceWorkerVersion, session: SessionWithId) => {
+  console.log('Service worker updated:', version.versionId);
+  console.log('Scope URL:', version.scopeURL);
 });
 ```
 

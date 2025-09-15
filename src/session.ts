@@ -71,6 +71,8 @@ export type DetachedSession = Pick<Session,
  */
 export type DetachedSessionWithId = DetachedSession & { id: Protocol.Target.SessionID };
 
+export type ServiceWorkerVersion = Protocol.ServiceWorker.ServiceWorkerVersion & { scopeURL?: string };
+
 /**
  * Type mapping for events.
  */
@@ -83,7 +85,7 @@ export declare type Events = {
     'session-attached': [session: SessionWithId, initializationTasks: Promise<unknown>[]];
     'session-detached': [session: DetachedSessionWithId, reason: 'detached' | 'destroyed' | 'web-contents detached' | 'web-contents destroyed'];
     'service-worker-restarted': [session: SessionWithId];
-    'service-worker-version-updated': [version: Protocol.ServiceWorker.ServiceWorkerVersion, session: SessionWithId];
+    'service-worker-version-updated': [version: ServiceWorkerVersion, session: SessionWithId];
 };
 
 /**
@@ -200,6 +202,13 @@ export interface ListenerOptions<K extends keyof Events, L extends K extends key
     signal?: AbortSignal;
 
     /**
+     * If `true`, the listener will be added to the listeners array only once.
+     *
+     * Default: `false`
+     */
+    once?: true;
+
+    /**
      * If `true`, the listener will be added to the beginning of the listeners array instead of the end.
      *
      * Default: `false`
@@ -249,6 +258,11 @@ export interface Target extends Omit<Protocol.Target.TargetInfo, 'url' | 'title'
      * @see - [List of types](https://source.chromium.org/chromium/chromium/src/+/main:content/browser/devtools/devtools_agent_host_impl.cc?ss=chromium&q=f:devtools%20-f:out%20%22::kTypeTab%5B%5D%22)
      */
     type: 'tab' | 'page' | 'iframe' | 'worker' | 'shared_worker' | 'service_worker' | 'worklet' | 'shared_storage_worklet' | 'browser' | 'webview' | 'other' | 'auction_worklet' | 'assistive_technology';
+
+    /**
+     * Initial URL of the target.
+     */
+    initialURL: string;
 
     /**
      * Target ID.
@@ -379,7 +393,7 @@ export class Session {
      */
     async getTargetInfo() {
         const ret = (await this.send('Target.getTargetInfo')).targetInfo;
-        this.#target = { ...ret, id: ret.targetId } as Target;
+        this.#target = { ...ret, id: ret.targetId, initialURL: ret.url } as Target;
         return ret;
     }
 
@@ -504,7 +518,7 @@ export class Session {
         const { sessionId } = await webContents.debugger.sendCommand('Target.attachToTarget', { targetId, flatten: true });
         const session = await this.fromSessionId(webContents, sessionId, options);
         const targetInfo = await session.getTargetInfo();
-        session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+        session.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
         return session;
     }
 
@@ -517,7 +531,7 @@ export class Session {
      */
     static async fromTargetInfo(webContents: WebContents, targetInfo: Protocol.Target.TargetInfo, options?: SessionOptions) {
         const session = await this.fromTargetId(webContents, targetInfo.targetId, options);
-        session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+        session.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
         return session;
     }
 
@@ -632,9 +646,15 @@ export class Session {
     /**
      * Adds a listener for `eventName`.
      *
-     * If `options.awaitCompletion` is `true` and the listener is async (returns a Promise),
-     * the emitter will await its completion before invoking the next listener.
-     * If `options.signal` is provided and later aborted, the listener is removed.
+     * @param eventName - The event name to listen for
+     * @param listener - The listener function to attach
+     * @param options - Optional configuration for the listener
+     * @param options.awaitCompletion - If `true` and the listener is async (returns a Promise),
+     *                                 the emitter will await its completion before invoking the next listener
+     * @param options.signal - If provided and later aborted, the listener is removed
+     * @param options.once - If `true`, the listener will be removed after first invocation
+     * @param options.prepend - If `true`, the listener will be added to the beginning of the listeners array
+     * @returns This `Session` instance (for chaining)
      */
     on<
         K extends keyof Events,
@@ -653,7 +673,9 @@ export class Session {
                 Reflect.deleteProperty(l[kAwaitCompletionSymbol], eventName);
             }
         }
-        if (options?.prepend) {
+        if (options?.once) {
+            this.#emitter.once(eventName, listener);
+        } else if (options?.prepend) {
             this.#emitter.prependListener(eventName, listener);
         } else {
             this.#emitter.on(eventName, listener);
@@ -742,7 +764,7 @@ export class Session {
 
                     attachedSessions.set(sessionId, session);
 
-                    session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+                    session.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
 
                     const initializationTasks: Promise<unknown>[] = [];
                     initializationTasks.push(this.#emit('session-attached', session as SessionWithId, initializationTasks));
@@ -761,8 +783,31 @@ export class Session {
                     }
 
                     if (targetInfo.type === 'service_worker') {
-                        let version: Protocol.ServiceWorker.ServiceWorkerVersion | undefined = undefined;
                         const controller = new AbortController();
+                        const registrationController = new AbortController();
+                        controller.signal.addEventListener('abort', () => registrationController.abort());
+
+                        let version: ServiceWorkerVersion | undefined = undefined;
+                        const registrationMap = new Map<Protocol.ServiceWorker.RegistrationID, Protocol.ServiceWorker.ServiceWorkerRegistration>();
+
+                        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('ServiceWorker.workerRegistrationUpdated')) {
+                            this.#emitter.setMaxListeners(this.#emitter.listenerCount('ServiceWorker.workerRegistrationUpdated') + 1);
+                        }
+                        this.on('ServiceWorker.workerRegistrationUpdated', event => {
+                            for (const registration of event.registrations) {
+                                if (version?.registrationId === registration.registrationId) {
+                                    version.scopeURL = registration.scopeURL;
+                                    registrationMap.clear();
+                                    registrationController.abort();
+                                    break;
+                                } else if (registration.isDeleted) {
+                                    registrationMap.delete(registration.registrationId);
+                                } else {
+                                    registrationMap.set(registration.registrationId, registration);
+                                }
+                            }
+                        }, { signal: registrationController.signal });
+
                         this.#emitter.once('session-detached', () => controller.abort());
                         if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('ServiceWorker.workerVersionUpdated')) {
                             this.#emitter.setMaxListeners(this.#emitter.listenerCount('ServiceWorker.workerVersionUpdated') + 1);
@@ -772,15 +817,26 @@ export class Session {
                                 const previousRunningStatus = version?.runningStatus;
                                 let found = event.versions.find(version => version.targetId === targetInfo.targetId);
                                 if (found) {
+                                    const scopeURL = version?.scopeURL;
                                     version = found;
+                                    version.scopeURL = scopeURL;
                                 } else if (version) {
                                     found = event.versions.find(v => v.versionId === version?.versionId);
                                     if (found) {
                                         found.targetId = version.targetId;
+                                        const scopeURL = version?.scopeURL;
                                         version = found;
+                                        version.scopeURL = scopeURL;
                                     }
                                 }
                                 if (version) {
+                                    if (version.scopeURL === undefined) {
+                                        version.scopeURL = registrationMap.get(version.registrationId)?.scopeURL;
+                                        if (version.scopeURL !== undefined) {
+                                            registrationMap.clear();
+                                            registrationController.abort();
+                                        }
+                                    }
                                     if (previousRunningStatus === 'stopped') {
                                         for (const exposeFunction of session.#exposeFunctions.values()) {
                                             exposeFunction.attach();
@@ -802,8 +858,8 @@ export class Session {
                     }
                     await Promise.race([Promise.allSettled(initializationTasks), new Promise(resolve => setTimeout(resolve, options?.timeout ?? 100))]);
                 } finally {
+                    await session.send('Runtime.runIfWaitingForDebugger');
                 }
-                await session.send('Runtime.runIfWaitingForDebugger');
             })
             .prependListener('Target.targetCreated', async ({ targetInfo }) => {
                 //
@@ -887,7 +943,7 @@ export class Session {
         }
 
         this.#targetInfoPr = this.send('Target.getTargetInfo').then(({ targetInfo }) => {
-            this.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+            this.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
             return targetInfo;
         });
 
@@ -907,6 +963,14 @@ export class Session {
                 return;
             }
             this.#emitter.emit(method as keyof ProtocolMapping.Events, params, sessionId || undefined);
+        });
+
+        webContents.on('destroyed', () => {
+            this.#exposeFunctions.forEach(exposeFunction => {
+                if ('removeHandler' in exposeFunction) {
+                    exposeFunction.removeHandler();
+                }
+            });
         });
     }
 
