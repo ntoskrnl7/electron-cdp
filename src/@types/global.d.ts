@@ -1,5 +1,6 @@
 /// <reference types="typescript/lib/lib.es2024.promise.d.ts" />
 
+type ExposeFunctionId = `expose-function-${ReturnType<typeof crypto.randomUUID>}`;
 type FrameId = import('../session').FrameId;
 type SessionID = import('devtools-protocol').Protocol.Target.SessionID;
 
@@ -12,7 +13,7 @@ namespace globalThis {
         superJSON: SuperJSON;
 
         callback: {
-            invoke?: (payload: string, sessionId?: SessionID, frameId?: FrameId) => void;
+            invoke?: (id: ExposeFunctionId, payload: string, sessionId?: SessionID, frameId?: FrameId) => void;
 
             /**
              * Callback invocation sequence.
@@ -44,6 +45,7 @@ interface Window {
 }
 
 interface InvokeMessage {
+    id: ExposeFunctionId;
     type: 'window' | 'worker' | 'service-worker' | 'shared-worker';
     sessionId?: SessionID;
     frameId?: FrameId;

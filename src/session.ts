@@ -71,6 +71,8 @@ export type DetachedSession = Pick<Session,
  */
 export type DetachedSessionWithId = DetachedSession & { id: Protocol.Target.SessionID };
 
+export type ServiceWorkerVersion = Protocol.ServiceWorker.ServiceWorkerVersion & { scopeURL?: string };
+
 /**
  * Type mapping for events.
  */
@@ -80,8 +82,10 @@ export declare type Events = {
     'execution-context-created': [context: ExecutionContext];
     'execution-context-destroyed': [event: Protocol.Runtime.ExecutionContextDestroyedEvent];
     'execution-contexts-cleared': [];
-    'session-attached': [session: SessionWithId, url: string];
+    'session-attached': [session: SessionWithId, initializationTasks: Promise<unknown>[]];
     'session-detached': [session: DetachedSessionWithId, reason: 'detached' | 'destroyed' | 'web-contents detached' | 'web-contents destroyed'];
+    'service-worker-restarted': [session: SessionWithId];
+    'service-worker-version-updated': [version: ServiceWorkerVersion, session: SessionWithId];
 };
 
 /**
@@ -156,6 +160,60 @@ export interface ExposeFunctionOptions {
      * - `true`, `{}`: The function call will be retried using the default retry configuration.
      */
     retry?: boolean | RetryOptions;
+
+    /**
+     * Indicates whether the function should be replaced if it already exists.
+     * Default: `false`
+     */
+    forceReplace?: boolean;
+}
+
+const kAwaitCompletionSymbol = Symbol('awaitCompletion');
+
+type AwaitCompletionOptions = boolean | { timeout: number };
+
+type Listener<K> = K extends keyof Events ? Events[K] extends unknown[] ? ((...args: Events[K]) => unknown | void) & { [kAwaitCompletionSymbol]?: { [eventName in keyof Events | K]?: AwaitCompletionOptions } } : never : never;
+
+/**
+ * Options that control how a listener is registered and executed.
+ */
+export interface ListenerOptions<K extends keyof Events, L extends K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => unknown : never : never> {
+    /**
+     * If `true`, the emitter will await this listener's completion before
+     * proceeding to the next listener for the same event.
+     *
+     * Notes
+     * - Only meaningful when the listener returns a Promise. For synchronous
+     *   listeners this flag has no effect.
+     * - When multiple listeners are registered with `blocking: true`, they are
+     *   awaited in registration order.
+     * - Errors thrown/rejected by a blocking listener are propagated to the
+     *   emitter's internal scheduler (and surfaced by the emitting call, e.g.
+     *   via `Promise.allSettled` in this implementation).
+     *
+     * Default: `false`
+     */
+    awaitCompletion?: (ReturnType<L> extends Promise<unknown> ? AwaitCompletionOptions : false) | undefined;
+
+    /**
+     * Optional AbortSignal. When aborted, the listener is automatically removed
+     * and will not be invoked for subsequent emits.
+     */
+    signal?: AbortSignal;
+
+    /**
+     * If `true`, the listener will be added to the listeners array only once.
+     *
+     * Default: `false`
+     */
+    once?: true;
+
+    /**
+     * If `true`, the listener will be added to the beginning of the listeners array instead of the end.
+     *
+     * Default: `false`
+     */
+    prepend?: boolean;
 }
 
 export type CustomizeSuperJSONFunction = (superJSON: SuperJSON) => void;
@@ -171,9 +229,26 @@ type XOR_<T1, T2> = (T1 | T2) extends object
     : T1 | T2;
 
 type ExposeFunction =
-    XOR<[{ executionContextCreated: (context: ExecutionContext) => Promise<void>; }, { frameCreated: (event: Electron.Event, details: Electron.FrameCreatedDetails) => void }, { scriptId: Protocol.Page.ScriptIdentifier; }]>
-    &
-    { removeHandler: () => void };
+    (XOR<[
+        {
+            executionContextCreated: (context: ExecutionContext) => Promise<void>;
+        },
+        {
+            frameCreated: (event: Electron.Event, details: Electron.FrameCreatedDetails) => void
+        },
+        {
+            scriptId: Protocol.Page.ScriptIdentifier;
+        }
+    ]>
+        &
+    {
+        attach: () => Promise<void>,
+        removeHandler: () => void
+    }) |
+    {
+        attach: () => Promise<void>;
+    };
+
 export interface Target extends Omit<Protocol.Target.TargetInfo, 'url' | 'title' | 'type' | 'targetId'> {
     /**
      * Type of target.
@@ -183,6 +258,11 @@ export interface Target extends Omit<Protocol.Target.TargetInfo, 'url' | 'title'
      * @see - [List of types](https://source.chromium.org/chromium/chromium/src/+/main:content/browser/devtools/devtools_agent_host_impl.cc?ss=chromium&q=f:devtools%20-f:out%20%22::kTypeTab%5B%5D%22)
      */
     type: 'tab' | 'page' | 'iframe' | 'worker' | 'shared_worker' | 'service_worker' | 'worklet' | 'shared_storage_worklet' | 'browser' | 'webview' | 'other' | 'auction_worklet' | 'assistive_technology';
+
+    /**
+     * Initial URL of the target.
+     */
+    initialURL: string;
 
     /**
      * Target ID.
@@ -232,19 +312,36 @@ export interface SessionOptions {
 export interface SetAutoAttachOptions {
     /**
      * Target types to attach to.
+     * 
+     * default: `undefined`
+     * 
+     * - `undefined` : Auto attachment to all related targets.
+     * - `Target['type'][]` : Auto attachment to related targets of the specified types.
      */
     targetTypes?: Target['type'][];
 
     /**
      * Whether to attach to related targets recursively.
+     * 
+     * default: `undefined`
+     * 
+     * - `undefined` : Auto attachment to related targets recursively.
+     * - `true` : Auto attachment to related targets recursively.
+     * - `false` : Auto attachment to related targets not recursively.
      */
     recursive?: boolean;
+
+    timeout?: number;
 }
 
 /**
  * Represents a session for interacting with the browser's DevTools protocol.
  */
-export class Session extends EventEmitter<Events> {
+export class Session {
+
+    #parent?: Session;
+
+    readonly #emitter = new EventEmitter<Events>();
 
     #target?: Target;
     #targetInfoPr: Promise<Protocol.Target.TargetInfo>;
@@ -261,10 +358,19 @@ export class Session extends EventEmitter<Events> {
 
     readonly #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
 
-    readonly #exposeFunctions: Map<string, ExposeFunction | null> = new Map();
+    readonly #exposeFunctions: Map<string, ExposeFunction> = new Map();
 
     #trackExecutionContextsEnabled = false;
     #autoAttachToRelatedTargetsEnabled = false;
+
+    /**
+     * Gets the parent session.
+     *
+     * @returns The parent session. `undefined` if the session is not attached to a parent session.
+     */
+    get parent() {
+        return this.#parent;
+    }
 
     /**
      * Indicates whether automatic attachment to related targets is enabled.
@@ -287,7 +393,7 @@ export class Session extends EventEmitter<Events> {
      */
     async getTargetInfo() {
         const ret = (await this.send('Target.getTargetInfo')).targetInfo;
-        this.#target = { ...ret, id: ret.targetId } as Target;
+        this.#target = { ...ret, id: ret.targetId, initialURL: ret.url } as Target;
         return ret;
     }
 
@@ -412,7 +518,7 @@ export class Session extends EventEmitter<Events> {
         const { sessionId } = await webContents.debugger.sendCommand('Target.attachToTarget', { targetId, flatten: true });
         const session = await this.fromSessionId(webContents, sessionId, options);
         const targetInfo = await session.getTargetInfo();
-        session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+        session.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
         return session;
     }
 
@@ -425,7 +531,7 @@ export class Session extends EventEmitter<Events> {
      */
     static async fromTargetInfo(webContents: WebContents, targetInfo: Protocol.Target.TargetInfo, options?: SessionOptions) {
         const session = await this.fromTargetId(webContents, targetInfo.targetId, options);
-        session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+        session.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
         return session;
     }
 
@@ -484,23 +590,24 @@ export class Session extends EventEmitter<Events> {
             return false;
         }
 
-        if (this.getMaxListeners() <= this.listenerCount('execution-context-created')) {
-            this.setMaxListeners(this.listenerCount('execution-context-created') + 1);
+        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-context-created')) {
+            this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-context-created') + 1);
         }
-        if (this.getMaxListeners() <= this.listenerCount('execution-context-destroyed')) {
-            this.setMaxListeners(this.listenerCount('execution-context-destroyed') + 1);
+        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-context-destroyed')) {
+            this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-context-destroyed') + 1);
         }
-        if (this.getMaxListeners() <= this.listenerCount('execution-contexts-cleared')) {
-            this.setMaxListeners(this.listenerCount('execution-contexts-cleared') + 1);
+        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-contexts-cleared')) {
+            this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-contexts-cleared') + 1);
         }
         this
+            .#emitter
             .prependListener('Runtime.executionContextCreated', ({ context }) => {
                 const ctx = new ExecutionContext(this, context);
                 this.#executionContexts.set(context.id, ctx);
-                this.emit('execution-context-created', ctx);
+                this.#emitter.emit('execution-context-created', ctx);
             })
             .prependListener('Runtime.executionContextDestroyed', event => {
-                this.emit('execution-context-destroyed', event);
+                this.#emitter.emit('execution-context-destroyed', event);
                 this.#executionContexts.delete(event.executionContextId);
                 for (const ctx of this.#executionContexts.values()) {
                     if (ctx.id && ctx.description?.uniqueId === event.executionContextUniqueId) {
@@ -510,12 +617,78 @@ export class Session extends EventEmitter<Events> {
             })
             .prependListener('Runtime.executionContextsCleared', () => {
                 this.#executionContexts.clear();
-                this.emit('execution-contexts-cleared');
+                this.#emitter.emit('execution-contexts-cleared');
             });
 
         await this.send('Runtime.enable');
         this.#trackExecutionContextsEnabled = true;
         return true;
+    }
+
+    async #emit<K>(eventName: keyof Events | K, ...args: K extends keyof Events ? Events[K] extends unknown[] ? Events[K] : never : never) {
+        return Promise.allSettled(this.#emitter.listeners(eventName).map(listener => {
+            try {
+                const awaitCompletionOptions = (listener as Listener<K>)[kAwaitCompletionSymbol]?.[eventName];
+                if (awaitCompletionOptions) {
+                    if (awaitCompletionOptions === true) {
+                        return Promise.resolve(listener(...args));
+                    }
+                    return Promise.race([Promise.resolve(listener(...args)), new Promise(resolve => setTimeout(resolve, awaitCompletionOptions.timeout))]);
+                }
+                listener(...args);
+                return Promise.resolve();
+            } catch (e) {
+                return Promise.reject(e);
+            }
+        }));
+    }
+
+    /**
+     * Adds a listener for `eventName`.
+     *
+     * @param eventName - The event name to listen for
+     * @param listener - The listener function to attach
+     * @param options - Optional configuration for the listener
+     * @param options.awaitCompletion - If `true` and the listener is async (returns a Promise),
+     *                                 the emitter will await its completion before invoking the next listener
+     * @param options.signal - If provided and later aborted, the listener is removed
+     * @param options.once - If `true`, the listener will be removed after first invocation
+     * @param options.prepend - If `true`, the listener will be added to the beginning of the listeners array
+     * @returns This `Session` instance (for chaining)
+     */
+    on<
+        K extends keyof Events,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        L extends K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => any : never : never
+    >(eventName: K, listener: L, options?: ListenerOptions<K, L>) {
+        if (options?.signal) {
+            options.signal.addEventListener('abort', () => this.#emitter.off(eventName, listener));
+        }
+        const l = listener as Listener<K>;
+        if (options?.awaitCompletion) {
+            l[kAwaitCompletionSymbol] ??= {};
+            l[kAwaitCompletionSymbol][eventName] = options.awaitCompletion
+        } else {
+            if (l[kAwaitCompletionSymbol]) {
+                Reflect.deleteProperty(l[kAwaitCompletionSymbol], eventName);
+            }
+        }
+        if (options?.once) {
+            this.#emitter.once(eventName, listener);
+        } else if (options?.prepend) {
+            this.#emitter.prependListener(eventName, listener);
+        } else {
+            this.#emitter.on(eventName, listener);
+        }
+        return this;
+    }
+
+    off<
+        K extends keyof Events,
+        L extends K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => unknown : never : never
+    >(eventName: K, listener: L) {
+        this.#emitter.off(eventName, listener);
+        return this;
     }
 
     /**
@@ -537,27 +710,35 @@ export class Session extends EventEmitter<Events> {
 
         const filter: Protocol.Target.TargetFilter | undefined = options?.targetTypes?.map?.(type => ({ type }));
 
-        if (this.getMaxListeners() <= this.listenerCount('Target.attachedToTarget')) {
-            this.setMaxListeners(this.listenerCount('Target.attachedToTarget') + 1);
+        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.attachedToTarget')) {
+            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.attachedToTarget') + 1);
         }
-        if (this.getMaxListeners() <= this.listenerCount('Target.detachedFromTarget')) {
-            this.setMaxListeners(this.listenerCount('Target.detachedFromTarget') + 1);
+        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.detachedFromTarget')) {
+            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.detachedFromTarget') + 1);
         }
-        if (this.getMaxListeners() <= this.listenerCount('Target.targetCreated')) {
-            this.setMaxListeners(this.listenerCount('Target.targetCreated') + 1);
+        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.targetCreated')) {
+            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.targetCreated') + 1);
         }
-        if (this.getMaxListeners() <= this.listenerCount('Target.targetDestroyed')) {
-            this.setMaxListeners(this.listenerCount('Target.targetDestroyed') + 1);
+        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.targetDestroyed')) {
+            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.targetDestroyed') + 1);
         }
         const attachedSessions = new Map<Protocol.Target.SessionID, SessionWithId>();
 
         if (this.webContents.debugger.getMaxListeners() <= this.webContents.debugger.listenerCount('detached')) {
             this.webContents.debugger.setMaxListeners(this.webContents.debugger.listenerCount('detached') + 1);
+            this.webContents.debugger.on('detach', () => {
+                attachedSessions.forEach(session => {
+                    if (session.id) {
+                        this.#emitter.emit('session-detached', session, 'web-contents detached');
+                    }
+                });
+                attachedSessions.clear();
+            });
         }
         this.webContents.debugger.on('detach', () => {
             attachedSessions.forEach(session => {
                 if (session.id) {
-                    this.emit('session-detached', session, 'web-contents detached');
+                    this.#emitter.emit('session-detached', session, 'web-contents detached');
                 }
             });
             attachedSessions.clear();
@@ -569,26 +750,115 @@ export class Session extends EventEmitter<Events> {
         this.webContents.on('destroyed', () => {
             attachedSessions.forEach(session => {
                 if (session.id) {
-                    this.emit('session-detached', session, 'web-contents destroyed');
+                    this.#emitter.emit('session-detached', session, 'web-contents destroyed');
                 }
             });
             attachedSessions.clear();
         });
 
-        this
+        this.#emitter
             .prependListener('Target.attachedToTarget', async ({ sessionId, targetInfo }) => {
                 const session = await Session.fromSessionId(this.webContents, sessionId);
+                try {
+                    session.#parent = this;
 
-                attachedSessions.set(sessionId, session);
+                    attachedSessions.set(sessionId, session);
 
-                session.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
-                if (this.webContents.cdp !== this) {
-                    this.webContents.cdp?.emit?.('session-attached', session as SessionWithId, targetInfo.url);
-                }
-                this.emit('session-attached', session as SessionWithId, targetInfo.url);
+                    session.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
 
-                if (options?.recursive) {
-                    session.setAutoAttach(options);
+                    const initializationTasks: Promise<unknown>[] = [];
+                    initializationTasks.push(this.#emit('session-attached', session as SessionWithId, initializationTasks));
+
+                    let parent = this.parent;
+                    while (parent) {
+                        initializationTasks.push(parent.#emit('session-attached', session as SessionWithId, initializationTasks));
+                        parent = parent.parent;
+                    }
+                    if (this.webContents.cdp && this.webContents.cdp !== this) {
+                        initializationTasks.push(this.webContents.cdp.#emit('session-attached', session as SessionWithId, initializationTasks));
+                    }
+
+                    if (options?.recursive) {
+                        session.setAutoAttach(options);
+                    }
+
+                    if (targetInfo.type === 'service_worker') {
+                        const controller = new AbortController();
+                        const registrationController = new AbortController();
+                        controller.signal.addEventListener('abort', () => registrationController.abort());
+
+                        let version: ServiceWorkerVersion | undefined = undefined;
+                        const registrationMap = new Map<Protocol.ServiceWorker.RegistrationID, Protocol.ServiceWorker.ServiceWorkerRegistration>();
+
+                        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('ServiceWorker.workerRegistrationUpdated')) {
+                            this.#emitter.setMaxListeners(this.#emitter.listenerCount('ServiceWorker.workerRegistrationUpdated') + 1);
+                        }
+                        this.on('ServiceWorker.workerRegistrationUpdated', event => {
+                            for (const registration of event.registrations) {
+                                if (version?.registrationId === registration.registrationId) {
+                                    version.scopeURL = registration.scopeURL;
+                                    registrationMap.clear();
+                                    registrationController.abort();
+                                    break;
+                                } else if (registration.isDeleted) {
+                                    registrationMap.delete(registration.registrationId);
+                                } else {
+                                    registrationMap.set(registration.registrationId, registration);
+                                }
+                            }
+                        }, { signal: registrationController.signal });
+
+                        this.#emitter.once('session-detached', () => controller.abort());
+                        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('ServiceWorker.workerVersionUpdated')) {
+                            this.#emitter.setMaxListeners(this.#emitter.listenerCount('ServiceWorker.workerVersionUpdated') + 1);
+                        }
+                        await this
+                            .on('ServiceWorker.workerVersionUpdated', event => {
+                                const previousRunningStatus = version?.runningStatus;
+                                let found = event.versions.find(version => version.targetId === targetInfo.targetId);
+                                if (found) {
+                                    const scopeURL = version?.scopeURL;
+                                    version = found;
+                                    version.scopeURL = scopeURL;
+                                } else if (version) {
+                                    found = event.versions.find(v => v.versionId === version?.versionId);
+                                    if (found) {
+                                        found.targetId = version.targetId;
+                                        const scopeURL = version?.scopeURL;
+                                        version = found;
+                                        version.scopeURL = scopeURL;
+                                    }
+                                }
+                                if (version) {
+                                    if (version.scopeURL === undefined) {
+                                        version.scopeURL = registrationMap.get(version.registrationId)?.scopeURL;
+                                        if (version.scopeURL !== undefined) {
+                                            registrationMap.clear();
+                                            registrationController.abort();
+                                        }
+                                    }
+                                    if (previousRunningStatus === 'stopped') {
+                                        for (const exposeFunction of session.#exposeFunctions.values()) {
+                                            exposeFunction.attach();
+                                        }
+                                        if (this.webContents.cdp && this.webContents.cdp !== this) {
+                                            this.webContents.cdp.#emitter.emit('service-worker-restarted', session);
+                                        }
+                                        this.#emitter.emit('service-worker-restarted', session);
+                                        session.#emitter.emit('service-worker-restarted', session);
+                                    }
+                                    if (this.webContents.cdp && this.webContents.cdp !== this) {
+                                        this.webContents.cdp.#emitter.emit('service-worker-version-updated', version, session);
+                                    }
+                                    this.#emitter.emit('service-worker-version-updated', version, session);
+                                    session.#emitter.emit('service-worker-version-updated', version, session);
+                                }
+                            }, { signal: controller.signal })
+                            .send('ServiceWorker.enable');
+                    }
+                    await Promise.race([Promise.allSettled(initializationTasks), new Promise(resolve => setTimeout(resolve, options?.timeout ?? 100))]);
+                } finally {
+                    await session.send('Runtime.runIfWaitingForDebugger');
                 }
             })
             .prependListener('Target.targetCreated', async ({ targetInfo }) => {
@@ -611,22 +881,24 @@ export class Session extends EventEmitter<Events> {
                 const session = attachedSessions.get(sessionId);
                 if (session) {
                     attachedSessions.delete(sessionId);
-                    this.emit('session-detached', session, 'detached');
+                    session.#emitter.emit('session-detached', session, 'detached');
+                    this.#emitter.emit('session-detached', session, 'detached');
                 }
             })
             .prependListener('Target.targetDestroyed', async ({ targetId }) => {
                 attachedSessions.forEach(session => {
                     if (session.id && session.target.id === targetId) {
                         attachedSessions.delete(session.id);
-                        this.emit('session-detached', session, 'destroyed');
+                        session.#emitter.emit('session-detached', session, 'destroyed');
+                        this.#emitter.emit('session-detached', session, 'destroyed');
                     }
                 });
-            });
+            })
 
         await this.send('Target.setAutoAttach', {
             autoAttach: true,
             flatten: true,
-            waitForDebuggerOnStart: false,
+            waitForDebuggerOnStart: true,
             filter
         });
 
@@ -660,8 +932,6 @@ export class Session extends EventEmitter<Events> {
      * @param protocolVersion - Optional DevTools Protocol version to use.
      */
     constructor(webContents: WebContents, sessionId?: Protocol.Target.SessionID, protocolVersion?: string | undefined) {
-        super();
-
         this.id = sessionId;
         this.webContents = webContents;
         this.#superJSON = new SuperJSON();
@@ -673,7 +943,7 @@ export class Session extends EventEmitter<Events> {
         }
 
         this.#targetInfoPr = this.send('Target.getTargetInfo').then(({ targetInfo }) => {
-            this.#target = { ...targetInfo, id: targetInfo.targetId } as Target;
+            this.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
             return targetInfo;
         });
 
@@ -692,20 +962,16 @@ export class Session extends EventEmitter<Events> {
             if (this.id && this.id !== sessionId) {
                 return;
             }
-            this.emit(method as keyof ProtocolMapping.Events, params, sessionId || undefined);
+            this.#emitter.emit(method as keyof ProtocolMapping.Events, params, sessionId || undefined);
         });
-    }
 
-    /**
-     * Registers `listener` as the only handler for `eventName` on this instance.
-     * Any existing listeners for the same event are removed first to prevent duplicates.
-     *
-     * @param eventName - CDP event name (e.g., 'Runtime.consoleAPICalled').
-     * @param listener  - Listener function to attach.
-     * @returns This `Session` instance (for chaining).
-     */
-    setExclusiveListener<K>(eventName: keyof Events | K, listener: K extends keyof Events ? Events[K] extends unknown[] ? (...args: Events[K]) => void : never : never): this {
-        return this.removeAllListeners(eventName).on(eventName, listener);
+        webContents.on('destroyed', () => {
+            this.#exposeFunctions.forEach(exposeFunction => {
+                if ('removeHandler' in exposeFunction) {
+                    exposeFunction.removeHandler();
+                }
+            });
+        });
     }
 
     /**
@@ -929,14 +1195,23 @@ export class Session extends EventEmitter<Events> {
      * @param name - The name under which the function will be exposed.
      * @param fn - The function to expose.
      * @param options - Options for exposing the function.
+     * @returns True if the function is exposed successfully, false otherwise.
      */
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
-        const attachFunction = (name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
+        const id = `expose-function-${crypto.randomUUID()}` as const;
+
+        if (this.#exposeFunctions.has(name)) {
+            return false;
+        }
+
+        const attachFunction = (id: ExposeFunctionId, name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
+
             // @ts-expect-error : ignore
             globalThis.$cdp ??= { callback: {} };
 
             globalThis.$cdp.callback ??= { sequence: BigInt(0), returnValues: {}, errors: {} };
 
+            const forceReplace = options?.forceReplace ?? false;
             const mode = options?.mode ?? 'Electron';
 
             if ('window' in globalThis && frameId) {
@@ -949,7 +1224,7 @@ export class Session extends EventEmitter<Events> {
             }
 
             if (mode === 'Electron') {
-                globalThis.$cdp.callback.invoke = (payload, sessionId, frameId) => {
+                globalThis.$cdp.callback.invoke = (id, payload, sessionId, frameId) => {
                     let type: 'unknown' | 'window' | 'worker' | 'shared-worker' | 'service-worker';
                     if (globalThis.DedicatedWorkerGlobalScope !== undefined) {
                         type = 'worker';
@@ -969,12 +1244,12 @@ export class Session extends EventEmitter<Events> {
                             window.$cdp.frameIdResolve = resolve;
                         }
                         if (frameId) {
-                            console.debug('cdp-utils-' + JSON.stringify({ type, frameId, sessionId, payload } as InvokeMessage));
+                            console.debug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                         } else {
-                            window.$cdp.frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ type, frameId, sessionId, payload } as InvokeMessage)));
+                            window.$cdp.frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage)));
                         }
                     } else {
-                        console.debug('cdp-utils-' + JSON.stringify({ type, frameId, sessionId, payload } as InvokeMessage));
+                        console.debug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                     }
                 };
             }
@@ -994,7 +1269,7 @@ export class Session extends EventEmitter<Events> {
                 lastName = parts[parts.length - 1];
             }
 
-            if (!global[lastName]) {
+            if (forceReplace || !global[lastName]) {
                 global[lastName] = (...args: unknown[]) => {
                     const sequence = `${globalThis.$cdp.callback.sequence++}-${Math.random()}`;
                     globalThis.$cdp.callback.returnValues[sequence] = { name, args };
@@ -1002,7 +1277,7 @@ export class Session extends EventEmitter<Events> {
 
                     const invoke = () => {
                         if (mode === 'Electron' && globalThis.$cdp.callback.invoke) {
-                            globalThis.$cdp.callback.invoke(globalThis.$cdp.superJSON.stringify({ sequence, name, args }), sessionId, frameId);
+                            globalThis.$cdp.callback.invoke(id, globalThis.$cdp.superJSON.stringify({ sequence, name, args }), sessionId, frameId);
                         } else if (mode === 'CDP' && globalThis['$cdp.callback.invoke']) {
                             globalThis['$cdp.callback.invoke'](globalThis.$cdp.superJSON.stringify({ sequence, name, args }));
                         } else {
@@ -1210,40 +1485,16 @@ export class Session extends EventEmitter<Events> {
             }
         };
 
+        const targetInfo = await this.#targetInfoPr;
         let removeHandler;
         if (mode === 'CDP') {
             await this.send('Runtime.addBinding', { name: '$cdp.callback.invoke' });
-            this.prependListener('Runtime.bindingCalled', bindingCalled);
-            removeHandler = () => { this.off('Runtime.bindingCalled', bindingCalled) };
+            this.#emitter.prependListener('Runtime.bindingCalled', bindingCalled);
+            removeHandler = () => { this.#emitter.off('Runtime.bindingCalled', bindingCalled) };
         } else {
-            const targetInfo = await this.#targetInfoPr;
             switch (targetInfo.type as Target['type']) {
                 case 'service_worker': {
-                    const url = (await this.#targetInfoPr).url;
-                    const { promise, resolve } = Promise.withResolvers<string>();
                     const serviceWorkers = this.webContents.session.serviceWorkers;
-                    if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('running-status-changed')) {
-                        serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('running-status-changed') + 1);
-                    }
-                    const h = setTimeout(() => {
-                        const versionId = Object.entries(this.webContents.session.serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0];
-                        if (versionId !== undefined) {
-                            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
-                            resolve(versionId);
-                        }
-                    }, 1000);
-                    const onRunningStatusChanged = (details: Electron.Event<Electron.ServiceWorkersRunningStatusChangedEventParams>) => {
-                        const versionId = Object.keys(serviceWorkers.getAllRunning()).find(versionId => Number(versionId) === details.versionId);
-                        if (versionId !== undefined) {
-                            serviceWorkers.off('running-status-changed', onRunningStatusChanged);
-                            clearTimeout(h);
-                            resolve(versionId);
-                        }
-                    };
-    
-                    serviceWorkers.on('running-status-changed', onRunningStatusChanged);
-
-                    const versionId: Electron.ServiceWorkerInfo['versionId'] = Number(Object.entries(this.webContents.session.serviceWorkers.getAllRunning()).find(([, info]) => info.scriptUrl === url)?.[0] ?? await promise);
 
                     const onServiceWorkerConsoleMessage = async (
                         _event: {
@@ -1252,8 +1503,12 @@ export class Session extends EventEmitter<Events> {
                         },
                         messageDetails: globalThis.Electron.MessageDetails
                     ) => {
-                        if (messageDetails.versionId === versionId && messageDetails.level === 0 && messageDetails.message.startsWith('cdp-utils-')) {
-                            const { type, sessionId, payload: payloadString } = JSON.parse(messageDetails.message.substring('cdp-utils-'.length)) as InvokeMessage;
+                        if (messageDetails.level === 0 && messageDetails.message.startsWith('cdp-utils-')) {
+                            const { id: currentId, type, sessionId, payload: payloadString } = JSON.parse(messageDetails.message.substring('cdp-utils-'.length)) as InvokeMessage;
+
+                            if (currentId !== id) {
+                                return;
+                            }
 
                             if (type !== 'service-worker' || sessionId !== this.id) {
                                 return;
@@ -1346,17 +1601,20 @@ export class Session extends EventEmitter<Events> {
         }
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
 
-        let entry = null;
+        let entry;
         try {
-            if ((await this.#domainsPr).find(d => d.name === 'Page')) {
-                const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
-                    runImmediately: true,
-                    source: generateScriptString({ session: this }, attachFunction, name, options, this.id)
-                })).identifier;
-                entry = {
-                    scriptId,
-                    removeHandler
-                };
+            if (targetInfo.type !== 'service_worker' && targetInfo.type !== 'worker' && targetInfo.type !== 'shared_worker') {
+                if ((await this.#domainsPr).find(d => d.name === 'Page')) {
+                    const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
+                        runImmediately: true,
+                        source: generateScriptString({ session: this }, attachFunction, id, name, options, this.id)
+                    })).identifier;
+                    entry = {
+                        scriptId,
+                        attach: () => this.evaluate(attachFunction, id, name, options, this.id),
+                        removeHandler
+                    };
+                }
             }
         } catch (error) {
             if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
@@ -1377,7 +1635,7 @@ export class Session extends EventEmitter<Events> {
          */
         if (!entry) {
             try {
-                await this.evaluate(attachFunction, name, options, this.id);
+                await this.evaluate(attachFunction, id, name, options, this.id);
             } catch (error) {
                 if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                     console.error(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
@@ -1388,7 +1646,7 @@ export class Session extends EventEmitter<Events> {
 
             if (mode === 'CDP') {
                 for (const ctx of this.#executionContexts.values()) {
-                    promises.push(ctx.evaluate(attachFunction, name, options, this.id).catch(error => {
+                    promises.push(ctx.evaluate(attachFunction, id, name, options, this.id).catch(error => {
                         if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
                             console.debug(error);
                         }
@@ -1397,19 +1655,20 @@ export class Session extends EventEmitter<Events> {
 
                 const executionContextCreated = async (context: ExecutionContext) => {
                     try {
-                        await context.evaluate(attachFunction, name, options, this.id);
+                        await context.evaluate(attachFunction, id, name, options, this.id);
                     } catch (error) {
                         if ((error as Error).message !== 'Cannot find context with specified id') {
                             console.debug(error);
                         }
                     }
                 };
-                if (this.getMaxListeners() <= this.listenerCount('execution-context-created')) {
-                    this.setMaxListeners(this.listenerCount('execution-context-created') + 1);
+                if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-context-created')) {
+                    this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-context-created') + 1);
                 }
-                this.prependListener('execution-context-created', executionContextCreated);
+                this.#emitter.prependListener('execution-context-created', executionContextCreated);
                 entry = {
                     executionContextCreated,
+                    attach: () => this.evaluate(attachFunction, id, name, options, this.id),
                     removeHandler
                 };
             } else if (this.id === undefined) {
@@ -1418,7 +1677,7 @@ export class Session extends EventEmitter<Events> {
                         if (frame.evaluate === undefined) {
                             this.#patchWebFrameMain(frame);
                         }
-                        promises.push(frame.evaluate(attachFunction, name, options, this.id, `${frame.processId}-${frame.routingId}`));
+                        promises.push(frame.evaluate(attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`));
                     } catch (error) {
                         console.debug(error);
                     }
@@ -1432,7 +1691,7 @@ export class Session extends EventEmitter<Events> {
                         if (details.frame.evaluate === undefined) {
                             this.#patchWebFrameMain(details.frame);
                         }
-                        details.frame.evaluate(attachFunction, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
+                        details.frame.evaluate(attachFunction, id, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
                     } catch (error) {
                         console.debug(error);
                     }
@@ -1443,13 +1702,22 @@ export class Session extends EventEmitter<Events> {
                 this.webContents.on('frame-created', frameCreated);
                 entry = {
                     frameCreated,
+                    attach: () => this.webContents.mainFrame.evaluate(attachFunction, id, name, options, this.id),
                     removeHandler
                 };
             }
             await Promise.allSettled(promises);
         }
 
+        if (!entry) {
+            entry = {
+                attach: () => this.evaluate(attachFunction, id, name, options, this.id),
+                removeHandler
+            };
+        }
+
         this.#exposeFunctions.set(name, entry);
+        return true;
     }
 
     /**
@@ -1484,24 +1752,35 @@ export class Session extends EventEmitter<Events> {
     }
 
     async #removeExposedFunction(name: string, entry: ExposeFunction) {
-        entry.removeHandler();
+        if ('removeHandler' in entry) {
+            entry.removeHandler?.();
+        }
+
         if ('scriptId' in entry) {
             await this.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.scriptId });
         } else if ('executionContextCreated' in entry) {
-            this.off('execution-context-created', entry.executionContextCreated);
-        } else {
+            this.#emitter.off('execution-context-created', entry.executionContextCreated);
+        } else if ('frameCreated' in entry) {
             this.webContents.off('frame-created', entry.frameCreated);
         }
 
-        await Promise.allSettled(this.webContents.mainFrame.framesInSubtree.map(frame => {
-            if (frame.evaluate === undefined) {
-                this.#patchWebFrameMain(frame);
-            }
-            // @ts-expect-error : globalThis[name]
-            return frame.evaluate(name => delete globalThis[name], name)
-        }).concat(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => {
-            // @ts-expect-error : globalThis[name]
-            return delete globalThis[name]
-        }, name))));
+        const promises = [];
+        if (this.target.type === 'page' || this.target.type === 'iframe') {
+            promises.push(this.webContents.mainFrame.framesInSubtree.map(frame => {
+                if (frame.evaluate === undefined) {
+                    this.#patchWebFrameMain(frame);
+                }
+                // @ts-expect-error : globalThis[name]
+                return frame.evaluate(name => delete globalThis[name], name);
+            }));
+        }
+
+        // @ts-expect-error : globalThis[name]
+        promises.push(this.evaluate(name => delete globalThis[name], name));
+
+        // @ts-expect-error : globalThis[name]
+        promises.push(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name)));
+
+        await Promise.allSettled(promises);
     }
 }
