@@ -54,4 +54,5 @@ interface InvokeMessage {
 
 interface Function {
     ['$mode']: 'Electron' | 'CDP';
+    ['$id']: string;
 }

@@ -163,9 +163,9 @@ export interface ExposeFunctionOptions {
 
     /**
      * Indicates whether the function should be replaced if it already exists.
-     * Default: `false`
+     * Default: `true`
      */
-    forceReplace?: boolean;
+    overwrite?: boolean;
 }
 
 const kAwaitCompletionSymbol = Symbol('awaitCompletion');
@@ -362,6 +362,14 @@ export class Session {
 
     #trackExecutionContextsEnabled = false;
     #autoAttachToRelatedTargetsEnabled = false;
+
+    #cleanup() {
+        this.#exposeFunctions.forEach(exposeFunction => {
+            if ('removeHandler' in exposeFunction) {
+                exposeFunction.removeHandler();
+            }
+        });
+    }
 
     /**
      * Gets the parent session.
@@ -858,6 +866,11 @@ export class Session {
                     }
                     await Promise.race([Promise.allSettled(initializationTasks), new Promise(resolve => setTimeout(resolve, options?.timeout ?? 100))]);
                 } finally {
+                    if (targetInfo.type === 'iframe') {
+                        // Fix for isolated iframes that won't load without Runtime.runIfWaitingForDebugger
+                        // This command must be executed in the parent session to resume iframe execution
+                        await this.send('Runtime.runIfWaitingForDebugger');
+                    }
                     await session.send('Runtime.runIfWaitingForDebugger');
                 }
             })
@@ -880,6 +893,7 @@ export class Session {
             .prependListener('Target.detachedFromTarget', async ({ sessionId }) => {
                 const session = attachedSessions.get(sessionId);
                 if (session) {
+                    session.#cleanup();
                     attachedSessions.delete(sessionId);
                     session.#emitter.emit('session-detached', session, 'detached');
                     this.#emitter.emit('session-detached', session, 'detached');
@@ -893,7 +907,7 @@ export class Session {
                         this.#emitter.emit('session-detached', session, 'destroyed');
                     }
                 });
-            })
+            });
 
         await this.send('Target.setAutoAttach', {
             autoAttach: true,
@@ -965,13 +979,7 @@ export class Session {
             this.#emitter.emit(method as keyof ProtocolMapping.Events, params, sessionId || undefined);
         });
 
-        webContents.on('destroyed', () => {
-            this.#exposeFunctions.forEach(exposeFunction => {
-                if ('removeHandler' in exposeFunction) {
-                    exposeFunction.removeHandler();
-                }
-            });
-        });
+        webContents.on('destroyed', () => this.#cleanup());
     }
 
     /**
@@ -1211,7 +1219,7 @@ export class Session {
 
             globalThis.$cdp.callback ??= { sequence: BigInt(0), returnValues: {}, errors: {} };
 
-            const forceReplace = options?.forceReplace ?? false;
+            const overwrite = options?.overwrite ?? true;
             const mode = options?.mode ?? 'Electron';
 
             if ('window' in globalThis && frameId) {
@@ -1269,13 +1277,17 @@ export class Session {
                 lastName = parts[parts.length - 1];
             }
 
-            if (forceReplace || !global[lastName]) {
+            if (overwrite || !global[lastName]) {
                 global[lastName] = (...args: unknown[]) => {
                     const sequence = `${globalThis.$cdp.callback.sequence++}-${Math.random()}`;
                     globalThis.$cdp.callback.returnValues[sequence] = { name, args };
                     globalThis.$cdp.callback.errors[sequence] = { name, args };
 
                     const invoke = () => {
+                        if ((global[lastName] as CallableFunction)['$id'] !== id) {
+                            console.debug('id changed', (global[lastName] as CallableFunction)['$id'], id);
+                            throw new Error(`'${name}' has been replaced.`);
+                        }
                         if (mode === 'Electron' && globalThis.$cdp.callback.invoke) {
                             globalThis.$cdp.callback.invoke(id, globalThis.$cdp.superJSON.stringify({ sequence, name, args }), sessionId, frameId);
                         } else if (mode === 'CDP' && globalThis['$cdp.callback.invoke']) {
@@ -1346,6 +1358,7 @@ export class Session {
                     return promise;
                 };
                 (global[lastName] as CallableFunction)['$mode'] = mode;
+                (global[lastName] as CallableFunction)['$id'] = id;
             }
         };
 
@@ -1495,7 +1508,6 @@ export class Session {
             switch (targetInfo.type as Target['type']) {
                 case 'service_worker': {
                     const serviceWorkers = this.webContents.session.serviceWorkers;
-
                     const onServiceWorkerConsoleMessage = async (
                         _event: {
                             preventDefault: () => void;
@@ -1559,6 +1571,9 @@ export class Session {
                                             }, payload.sequence, error), promise]);
                                         } catch (error) {
                                             if (error instanceof Error) {
+                                                if (error.message === 'Session with given id not found.') {
+                                                    serviceWorkers.off('console-message', onServiceWorkerConsoleMessage);
+                                                }
                                                 error.message = error.message + `\t(sessionId: ${sessionId})`
                                                 throw new Error(error.message);
                                             }
