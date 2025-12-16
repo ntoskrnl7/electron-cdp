@@ -1257,7 +1257,7 @@ export class Session {
                             window.$cdp.frameId.then(frameId => window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage)));
                         }
                     } else {
-                        window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
+                        $cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                     }
                 };
             }
