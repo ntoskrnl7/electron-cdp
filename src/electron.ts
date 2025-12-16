@@ -93,7 +93,7 @@ export class MainSession extends CDPSession {
                     }
                 }
                 await frame.executeJavaScript(`
-                    globalThis.$cdp ??= {};
+                    globalThis.$cdp ??= { consoleDebug: console.debug };
                     if (globalThis.$cdp.frameIdResolve) {
                         globalThis.$cdp.frameIdResolve('${frame.processId}-${frame.routingId}');
                         delete globalThis.$cdp.frameIdResolve;
@@ -124,7 +124,7 @@ export class MainSession extends CDPSession {
         promises.push(this.send('Page.addScriptToEvaluateOnNewDocument', {
             runImmediately: true,
             source: `
-            globalThis.$cdp ??= {};
+            globalThis.$cdp ??= { consoleDebug: console.debug };
             if (globalThis.$cdp.frameId === undefined) {
                 const { promise, resolve } = Promise.withResolvers();
                 globalThis.$cdp.frameId = promise;

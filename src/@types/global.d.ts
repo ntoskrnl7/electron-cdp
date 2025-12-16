@@ -30,6 +30,8 @@ namespace globalThis {
              */
             errors: { [key: string]: { name?: string, args?: unknown[], value?: Awaited<unknown> } };
         }
+
+        consoleDebug: typeof console.debug;
     };
 }
 
