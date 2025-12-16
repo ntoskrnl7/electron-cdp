@@ -1017,7 +1017,7 @@ export class Session {
             this.customizeSuperJSON = customizeSuperJSON;
         }
 
-        const source = `${superJSONBrowserScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;`;
+        const source = `${superJSONBrowserScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); (globalThis.$cdp ??= { consoleDebug: console.debug }).superJSON = SuperJSON.default;`;
         try {
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
@@ -1215,7 +1215,7 @@ export class Session {
         const attachFunction = (id: ExposeFunctionId, name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
 
             // @ts-expect-error : ignore
-            globalThis.$cdp ??= { callback: {} };
+            globalThis.$cdp ??= { callback: {}, consoleDebug: console.debug };
 
             globalThis.$cdp.callback ??= { sequence: BigInt(0), returnValues: {}, errors: {} };
 
@@ -1252,12 +1252,12 @@ export class Session {
                             window.$cdp.frameIdResolve = resolve;
                         }
                         if (frameId) {
-                            console.debug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
+                            window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                         } else {
-                            window.$cdp.frameId.then(frameId => console.debug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage)));
+                            window.$cdp.frameId.then(frameId => window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage)));
                         }
                     } else {
-                        console.debug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
+                        window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                     }
                 };
             }
