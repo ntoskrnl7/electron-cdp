@@ -1215,7 +1215,7 @@ export class Session {
         const attachFunction = (id: ExposeFunctionId, name: string, options?: ExposeFunctionOptions, sessionId?: Protocol.Target.SessionID, frameId?: FrameId) => {
 
             // @ts-expect-error : ignore
-            globalThis.$cdp ??= { callback: {}, consoleDebug: console.debug };
+            globalThis.$cdp ??= { consoleDebug: console.debug };
 
             globalThis.$cdp.callback ??= { sequence: BigInt(0), returnValues: {}, errors: {} };
 
@@ -1257,7 +1257,7 @@ export class Session {
                             window.$cdp.frameId.then(frameId => window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage)));
                         }
                     } else {
-                        $cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
+                       globalThis.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                     }
                 };
             }

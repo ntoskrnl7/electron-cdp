@@ -15,7 +15,7 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
     return '(async () => {' +
         (options?.session?.isSuperJSONPreloaded ?
             `
-            globalThis.$cdp ??= {};
+            globalThis.$cdp ??= { consoleDebug: console.debug };
             if (globalThis.$cdp.superJSON === undefined) {
                 try {
                     globalThis.$cdp.superJSON = globalThis.top.$cdp.superJSON;
@@ -57,7 +57,7 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
 
             `
             ${superJSONBrowserScript};
-            (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); (globalThis.$cdp ??= {}).superJSON = SuperJSON.default;
+            (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); (globalThis.$cdp ??= { consoleDebug: console.debug }).superJSON = SuperJSON.default;
             `
         )
         +
