@@ -5,7 +5,7 @@ import type Protocol from 'devtools-protocol';
 import { WebContents, webFrameMain, WebFrameMain } from 'electron';
 import { Session as CDPSession, SessionOptions } from './session';
 import { generateScriptString } from './utils';
-import SuperJSON from './superJSON';
+import SuperJSON from 'superjson';
 
 declare global {
     // eslint-disable-next-line @typescript-eslint/no-namespace

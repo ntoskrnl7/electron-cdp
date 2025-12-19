@@ -1,17 +1,21 @@
 /// <reference types="typescript/lib/lib.dom" />
 /// <reference types="typescript/lib/lib.webworker" />
 
-import EventEmitter from 'events';
+import EventEmitter from 'events'; // NOSONAR: Intentionally using `events` for compatibility with both browser and Node.js runtimes.
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
 import Electron, { WebContents, WebFrameMain, webFrameMain } from 'electron';
 import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
 
-import { registerTypes } from './superJSON';
-
 import superJSONBrowserScript from './superJSON.browser.js?raw';
 
 declare const globalThis: GlobalThis;
+
+function increamentMaxListeners(emitter: EventEmitter, eventName: string, added = 1) {
+    if (emitter.getMaxListeners() <= emitter.listenerCount(eventName)) {
+        emitter.setMaxListeners(emitter.listenerCount(eventName) + added);
+    }
+}
 
 function convertToFunction(code: string) {
     const trimmedCode = code.trim();
@@ -30,8 +34,9 @@ function convertToFunction(code: string) {
  */
 export type FrameId = `${number}-${number}`;
 
-function getWebFrameFromFrameId(frameId: FrameId) {
-    const [processId, routingId] = frameId.split('-').map(v => Number(v))
+function getWebFrameFromFrameId(frameId?: FrameId) {
+    if (frameId === undefined) return;
+    const [processId, routingId] = frameId.split('-').map(Number)
     return webFrameMain.fromId(processId, routingId);
 }
 
@@ -172,7 +177,7 @@ const kAwaitCompletionSymbol = Symbol('awaitCompletion');
 
 type AwaitCompletionOptions = boolean | { timeout: number };
 
-type Listener<K> = K extends keyof Events ? Events[K] extends unknown[] ? ((...args: Events[K]) => unknown | void) & { [kAwaitCompletionSymbol]?: { [eventName in keyof Events | K]?: AwaitCompletionOptions } } : never : never;
+type Listener<K> = K extends keyof Events ? Events[K] extends unknown[] ? ((...args: Events[K]) => unknown) & { [kAwaitCompletionSymbol]?: { [eventName in keyof Events | K]?: AwaitCompletionOptions } } : never : never;
 
 /**
  * Options that control how a listener is registered and executed.
@@ -193,7 +198,7 @@ export interface ListenerOptions<K extends keyof Events, L extends K extends key
      *
      * Default: `false`
      */
-    awaitCompletion?: (ReturnType<L> extends Promise<unknown> ? AwaitCompletionOptions : false) | undefined;
+    awaitCompletion?: (ReturnType<L> extends Promise<unknown> ? AwaitCompletionOptions : false);
 
     /**
      * Optional AbortSignal. When aborted, the listener is automatically removed
@@ -292,7 +297,7 @@ export interface SessionOptions {
     /**
      * Protocol version to use when attaching the debugger.
      */
-    protocolVersion?: string | undefined;
+    protocolVersion?: string;
 
     /**
      * Whether to automatically attach to related targets.
@@ -303,7 +308,7 @@ export interface SessionOptions {
      * - `true` : Auto attachment to related targets.
      * - `TargetType[]` : Auto attachment to related targets of the specified types.
      */
-    autoAttachToRelatedTargets?: boolean | (Target['type'][]) | undefined;
+    autoAttachToRelatedTargets?: boolean | (Target['type'][]);
 }
 
 /**
@@ -344,13 +349,13 @@ export class Session {
     readonly #emitter = new EventEmitter<Events>();
 
     #target?: Target;
-    #targetInfoPr: Promise<Protocol.Target.TargetInfo>;
+    readonly #targetInfoPr: Promise<Protocol.Target.TargetInfo>;
 
     readonly id?: Protocol.Target.SessionID;
     readonly webContents: WebContents;
 
     #domains?: Protocol.Schema.Domain[];
-    #domainsPr: Promise<Protocol.Schema.Domain[]>;
+    readonly #domainsPr: Promise<Protocol.Schema.Domain[]>;
 
     #isSuperJSONPreloaded = false;
     #superJSON: SuperJSON;
@@ -425,7 +430,7 @@ export class Session {
      * @returns Information about the domains associated with this session.
      */
     async getDomains() {
-        return this.#domainsPr;
+        return await this.#domainsPr;
     }
 
     /**
@@ -598,15 +603,9 @@ export class Session {
             return false;
         }
 
-        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-context-created')) {
-            this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-context-created') + 1);
-        }
-        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-context-destroyed')) {
-            this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-context-destroyed') + 1);
-        }
-        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-contexts-cleared')) {
-            this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-contexts-cleared') + 1);
-        }
+        increamentMaxListeners(this.#emitter, 'execution-context-created');
+        increamentMaxListeners(this.#emitter, 'execution-context-destroyed');
+        increamentMaxListeners(this.#emitter, 'execution-context-cleared');
         this
             .#emitter
             .prependListener('Runtime.executionContextCreated', ({ context }) => {
@@ -616,7 +615,7 @@ export class Session {
             })
             .prependListener('Runtime.executionContextDestroyed', event => {
                 this.#emitter.emit('execution-context-destroyed', event);
-                this.#executionContexts.delete(event.executionContextId);
+                this.#executionContexts.delete(event.executionContextId); // NOSONAR : 'executionContextId' is deprecated.
                 for (const ctx of this.#executionContexts.values()) {
                     if (ctx.id && ctx.description?.uniqueId === event.executionContextUniqueId) {
                         this.#executionContexts.delete(ctx.id);
@@ -676,11 +675,10 @@ export class Session {
         if (options?.awaitCompletion) {
             l[kAwaitCompletionSymbol] ??= {};
             l[kAwaitCompletionSymbol][eventName] = options.awaitCompletion
-        } else {
-            if (l[kAwaitCompletionSymbol]) {
-                Reflect.deleteProperty(l[kAwaitCompletionSymbol], eventName);
-            }
+        } else if (l[kAwaitCompletionSymbol]) {
+            Reflect.deleteProperty(l[kAwaitCompletionSymbol], eventName);
         }
+
         if (options?.once) {
             this.#emitter.once(eventName, listener);
         } else if (options?.prepend) {
@@ -718,31 +716,14 @@ export class Session {
 
         const filter: Protocol.Target.TargetFilter | undefined = options?.targetTypes?.map?.(type => ({ type }));
 
-        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.attachedToTarget')) {
-            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.attachedToTarget') + 1);
-        }
-        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.detachedFromTarget')) {
-            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.detachedFromTarget') + 1);
-        }
-        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.targetCreated')) {
-            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.targetCreated') + 1);
-        }
-        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('Target.targetDestroyed')) {
-            this.#emitter.setMaxListeners(this.#emitter.listenerCount('Target.targetDestroyed') + 1);
-        }
+        increamentMaxListeners(this.#emitter, 'Target.attachedToTarget');
+        increamentMaxListeners(this.#emitter, 'Target.detachedFromTarget');
+        increamentMaxListeners(this.#emitter, 'Target.targetCreated');
+        increamentMaxListeners(this.#emitter, 'Target.targetDestroyed');
+
         const attachedSessions = new Map<Protocol.Target.SessionID, SessionWithId>();
 
-        if (this.webContents.debugger.getMaxListeners() <= this.webContents.debugger.listenerCount('detached')) {
-            this.webContents.debugger.setMaxListeners(this.webContents.debugger.listenerCount('detached') + 1);
-            this.webContents.debugger.on('detach', () => {
-                attachedSessions.forEach(session => {
-                    if (session.id) {
-                        this.#emitter.emit('session-detached', session, 'web-contents detached');
-                    }
-                });
-                attachedSessions.clear();
-            });
-        }
+        increamentMaxListeners(this.webContents.debugger, 'detached');
         this.webContents.debugger.on('detach', () => {
             attachedSessions.forEach(session => {
                 if (session.id) {
@@ -752,9 +733,7 @@ export class Session {
             attachedSessions.clear();
         });
 
-        if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('destroyed')) {
-            this.webContents.setMaxListeners(this.webContents.listenerCount('destroyed') + 1);
-        }
+        increamentMaxListeners(this.webContents, 'destroyed');
         this.webContents.on('destroyed', () => {
             attachedSessions.forEach(session => {
                 if (session.id) {
@@ -775,15 +754,15 @@ export class Session {
                     session.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
 
                     const initializationTasks: Promise<unknown>[] = [];
-                    initializationTasks.push(this.#emit('session-attached', session as SessionWithId, initializationTasks));
+                    initializationTasks.push(this.#emit('session-attached', session, initializationTasks));
 
                     let parent = this.parent;
                     while (parent) {
-                        initializationTasks.push(parent.#emit('session-attached', session as SessionWithId, initializationTasks));
+                        initializationTasks.push(parent.#emit('session-attached', session, initializationTasks));
                         parent = parent.parent;
                     }
                     if (this.webContents.cdp && this.webContents.cdp !== this) {
-                        initializationTasks.push(this.webContents.cdp.#emit('session-attached', session as SessionWithId, initializationTasks));
+                        initializationTasks.push(this.webContents.cdp.#emit('session-attached', session, initializationTasks));
                     }
 
                     if (options?.recursive) {
@@ -798,9 +777,7 @@ export class Session {
                         let version: ServiceWorkerVersion | undefined = undefined;
                         const registrationMap = new Map<Protocol.ServiceWorker.RegistrationID, Protocol.ServiceWorker.ServiceWorkerRegistration>();
 
-                        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('ServiceWorker.workerRegistrationUpdated')) {
-                            this.#emitter.setMaxListeners(this.#emitter.listenerCount('ServiceWorker.workerRegistrationUpdated') + 1);
-                        }
+                        increamentMaxListeners(this.#emitter, 'ServiceWorker.workerRegistrationUpdated');
                         this.on('ServiceWorker.workerRegistrationUpdated', event => {
                             for (const registration of event.registrations) {
                                 if (version?.registrationId === registration.registrationId) {
@@ -817,9 +794,24 @@ export class Session {
                         }, { signal: registrationController.signal });
 
                         this.#emitter.once('session-detached', () => controller.abort());
-                        if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('ServiceWorker.workerVersionUpdated')) {
-                            this.#emitter.setMaxListeners(this.#emitter.listenerCount('ServiceWorker.workerVersionUpdated') + 1);
-                        }
+                        increamentMaxListeners(this.#emitter, 'ServiceWorker.workerVersionUpdated');
+
+                        const onRestarted = () => {
+                            if (this.webContents.cdp && this.webContents.cdp !== this) {
+                                this.webContents.cdp.#emitter.emit('service-worker-restarted', session);
+                            }
+                            this.#emitter.emit('service-worker-restarted', session);
+                            session.#emitter.emit('service-worker-restarted', session);
+                        };
+
+                        const onUpdated = (version: ServiceWorkerVersion) => {
+                            if (this.webContents.cdp && this.webContents.cdp !== this) {
+                                this.webContents.cdp.#emitter.emit('service-worker-version-updated', version, session);
+                            }
+                            this.#emitter.emit('service-worker-version-updated', version, session);
+                            session.#emitter.emit('service-worker-version-updated', version, session);
+                        };
+
                         await this
                             .on('ServiceWorker.workerVersionUpdated', event => {
                                 const previousRunningStatus = version?.runningStatus;
@@ -849,17 +841,9 @@ export class Session {
                                         for (const exposeFunction of session.#exposeFunctions.values()) {
                                             exposeFunction.attach();
                                         }
-                                        if (this.webContents.cdp && this.webContents.cdp !== this) {
-                                            this.webContents.cdp.#emitter.emit('service-worker-restarted', session);
-                                        }
-                                        this.#emitter.emit('service-worker-restarted', session);
-                                        session.#emitter.emit('service-worker-restarted', session);
+                                        onRestarted();
                                     }
-                                    if (this.webContents.cdp && this.webContents.cdp !== this) {
-                                        this.webContents.cdp.#emitter.emit('service-worker-version-updated', version, session);
-                                    }
-                                    this.#emitter.emit('service-worker-version-updated', version, session);
-                                    session.#emitter.emit('service-worker-version-updated', version, session);
+                                    onUpdated(version);
                                 }
                             }, { signal: controller.signal })
                             .send('ServiceWorker.enable');
@@ -950,25 +934,21 @@ export class Session {
         this.webContents = webContents;
         this.#superJSON = new SuperJSON();
 
-        registerTypes(this.#superJSON);
-
         if (!webContents.debugger.isAttached()) {
             webContents.debugger.attach(protocolVersion);
         }
 
-        this.#targetInfoPr = this.send('Target.getTargetInfo').then(({ targetInfo }) => {
+        this.#targetInfoPr = this.send('Target.getTargetInfo').then(({ targetInfo }) => { // NOSONAR
             this.#target = { ...targetInfo, id: targetInfo.targetId, initialURL: targetInfo.url } as Target;
             return targetInfo;
         });
 
-        this.#domainsPr = this.send('Schema.getDomains').then(r => {
+        this.#domainsPr = this.send('Schema.getDomains').then(r => { // NOSONAR
             this.#domains = r.domains;
             return this.#domains;
         });
 
-        if (webContents.debugger.getMaxListeners() <= webContents.debugger.listenerCount('message')) {
-            webContents.debugger.setMaxListeners(webContents.debugger.listenerCount('message') + 1);
-        }
+        increamentMaxListeners(webContents.debugger, 'message');
         webContents.debugger.on('message', (_, method, params, sessionId) => {
             if (this.id === undefined && sessionId) {
                 return;
@@ -1022,9 +1002,7 @@ export class Session {
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
             console.error('[Session.enableSuperJSON] Failed to inject code :', error);
-            if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('frame-created')) {
-                this.webContents.setMaxListeners(this.webContents.listenerCount('frame-created') + 1);
-            }
+            increamentMaxListeners(this.webContents, 'frame-created');
             this.webContents.on('frame-created', (_, details) => details.frame?.executeJavaScript(source).catch(console.error));
             for (const frame of this.webContents.mainFrame.framesInSubtree) {
                 frame.executeJavaScript(source).catch(console.error);
@@ -1094,7 +1072,6 @@ export class Session {
         }
         this.#customizeSuperJSON = customizeSuperJSON;
         this.#superJSON = new SuperJSON();
-        registerTypes(this.#superJSON);
         this.#customizeSuperJSON(this.#superJSON);
     }
 
@@ -1174,6 +1151,9 @@ export class Session {
     }
 
     #patchWebFrameMain(frame: WebFrameMain) {
+        if (frame.evaluate !== undefined) {
+            return frame;
+        }
         frame.evaluate ??= async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
             try {
                 if (typeof userGestureOrFn === 'boolean') {
@@ -1195,6 +1175,7 @@ export class Session {
                 throw error;
             }
         };
+        return frame;
     }
 
     /**
@@ -1208,6 +1189,9 @@ export class Session {
     async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
         const id = `expose-function-${crypto.randomUUID()}` as const;
 
+        if (options?.overwrite) {
+            await this.removeExposedFunction(name);
+        }
         if (this.#exposeFunctions.has(name)) {
             return false;
         }
@@ -1223,11 +1207,11 @@ export class Session {
             const mode = options?.mode ?? 'Electron';
 
             if ('window' in globalThis && frameId) {
-                if (window.$cdp.frameId === undefined) {
-                    window.$cdp.frameId = Promise.resolve(frameId);
-                } else if (window.$cdp.frameIdResolve) {
-                    window.$cdp.frameIdResolve(frameId);
-                    delete window.$cdp.frameIdResolve;
+                if (globalThis.window.$cdp.frameId === undefined) {
+                    globalThis.window.$cdp.frameId = Promise.resolve(frameId);
+                } else if (globalThis.window.$cdp.frameIdResolve) {
+                    globalThis.window.$cdp.frameIdResolve(frameId);
+                    delete globalThis.window.$cdp.frameIdResolve;
                 }
             }
 
@@ -1240,24 +1224,24 @@ export class Session {
                         type = 'shared-worker';
                     } else if (globalThis.ServiceWorkerGlobalScope !== undefined) {
                         type = 'service-worker';
-                    } else if (globalThis.Window !== undefined) {
-                        type = 'window';
-                    } else {
+                    } else if (globalThis.Window === undefined) {
                         type = 'unknown'
+                    } else {
+                        type = 'window';
                     }
                     if (globalThis.Window) {
-                        if (window.$cdp.frameId === undefined) {
+                        if (globalThis.window.$cdp.frameId === undefined) {
                             const { promise, resolve } = Promise.withResolvers<FrameId>();
-                            window.$cdp.frameId = promise;
-                            window.$cdp.frameIdResolve = resolve;
+                            globalThis.window.$cdp.frameId = promise;
+                            globalThis.window.$cdp.frameIdResolve = resolve;
                         }
                         if (frameId) {
-                            window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
+                            globalThis.window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                         } else {
-                            window.$cdp.frameId.then(frameId => window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage)));
+                            globalThis.window.$cdp.frameId.then(frameId => globalThis.window.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage)));
                         }
                     } else {
-                       globalThis.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
+                        globalThis.$cdp.consoleDebug('cdp-utils-' + JSON.stringify({ id, type, frameId, sessionId, payload } as InvokeMessage));
                     }
                 };
             }
@@ -1274,10 +1258,10 @@ export class Session {
                     scope = scope[part] as Record<string, unknown>;
                 }
                 global = scope;
-                lastName = parts[parts.length - 1];
+                lastName = parts.at(-1) ?? '';
             }
 
-            if (overwrite || !global[lastName]) {
+            if (overwrite || (lastName && !global[lastName])) {
                 global[lastName] = (...args: unknown[]) => {
                     const sequence = `${globalThis.$cdp.callback.sequence++}-${Math.random()}`;
                     globalThis.$cdp.callback.returnValues[sequence] = { name, args };
@@ -1395,7 +1379,7 @@ export class Session {
                     }, payload.sequence, ret);
                 }
             } catch (error) {
-                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                if (isUnexceptedError(error)) {
                     if (withReturnValue) {
                         await context.evaluate({ timeout }, (seq, error) => {
                             if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
@@ -1408,6 +1392,14 @@ export class Session {
         };
 
         const mode = options?.mode ?? 'Electron';
+        const withReturnValue = options?.withReturnValue;
+        const timeout = () => new Promise<void>((resolve, reject) => {
+            const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
+            if (timeout) {
+                setTimeout(reject, timeout);
+            }
+            resolve();
+        });
 
         const bindingCalled = (event: Protocol.Runtime.BindingCalledEvent) => {
             try {
@@ -1418,83 +1410,78 @@ export class Session {
                     }
                 }
             } catch (error) {
-                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+                if (isUnexceptedError(error)) {
                     console.debug(error);
                 }
             }
         };
 
-        const onConsoleMessage = async (details: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
-            if (details.level === 'debug' && details.message.startsWith('cdp-utils-')) {
-                const { type, sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length)) as InvokeMessage;
-                const frame = frameId ? getWebFrameFromFrameId(frameId) ?? details.frame : details.frame;
+        const init = async (target: this | Electron.WebFrameMain, sequence: string) => {
+            if (options?.retry) {
+                await Promise.race([target.evaluate(seq => {
+                    if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                        globalThis.$cdp.callback.returnValues[seq].init = true;
+                    }
+                }, sequence), timeout()]);
+            }
+        };
 
-                if (frame.evaluate === undefined) {
-                    this.#patchWebFrameMain(frame);
+        const resolve = async (target: this | Electron.WebFrameMain, sequence: string, result: unknown) => {
+            if (withReturnValue) {
+                await Promise.race([target.evaluate((seq, ret) => {
+                    if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
+                        globalThis.$cdp.callback.returnValues[seq].value = ret;
+                    }
+                }, sequence, result), timeout()]);
+            }
+        };
+        const reject = async (target: this | Electron.WebFrameMain, sequence: string, error: unknown) => {
+            if (withReturnValue) {
+                await Promise.race([target.evaluate((seq, error) => {
+                    if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
+                        globalThis.$cdp.callback.errors[seq].value = error;
+                    }
+                }, sequence, error), timeout()]);
+            }
+        };
+
+        const onConsoleMessage = async (details: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
+
+            const parseMessage = () => {
+                if (details.level !== 'debug' || !details.message.startsWith('cdp-utils-')) {
+                    return {};
                 }
+
+                const { type, sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length)) as InvokeMessage;
+
+                const frame = this.#patchWebFrameMain(getWebFrameFromFrameId(frameId) ?? details.frame);
 
                 if (sessionId !== this.id) {
-                    return;
+                    return {};
                 }
-
-                const target = ((type === 'worker' || type === 'service-worker' || type === 'shared-worker') ? this : frame);
                 const payload: Payload = this.superJSON.parse(payloadString);
                 if (payload.name !== name) {
-                    return;
+                    return {};
                 }
+                return { payload, target: ((type === 'worker' || type === 'service-worker' || type === 'shared-worker') ? this : frame) };
+            };
+            const { payload, target } = parseMessage();
+            if (!payload) {
+                return;
+            }
 
-                const withReturnValue = options?.withReturnValue;
-                const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
+            try {
+                await init(target, payload.sequence);
+                await resolve(target, payload.sequence, await fn(...payload.args));
+            } catch (error) {
                 try {
-                    if (options?.retry) {
-                        const { promise, resolve, reject } = Promise.withResolvers<void>();
-                        if (timeout) {
-                            setTimeout(reject, timeout);
-                        }
-                        await Promise.race([target.evaluate(seq => {
-                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
-                                globalThis.$cdp.callback.returnValues[seq].init = true;
-                            }
-                        }, payload.sequence), promise]);
-                        resolve();
-                    }
-                    const ret = await fn(...payload.args);
-
-                    if (withReturnValue) {
-                        const { promise, resolve, reject } = Promise.withResolvers<void>();
-                        if (timeout) {
-                            setTimeout(reject, timeout);
-                        }
-                        await Promise.race([target.evaluate((seq, ret) => {
-                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
-                                globalThis.$cdp.callback.returnValues[seq].value = ret;
-                            }
-                        }, payload.sequence, ret), promise]);
-                        resolve();
-                    }
+                    await reject(target, payload.sequence, error);
                 } catch (error) {
-                    if (withReturnValue) {
-                        const { promise, resolve, reject } = Promise.withResolvers<void>();
-                        if (timeout) {
-                            setTimeout(reject, timeout);
-                        }
-                        try {
-                            await Promise.race([target.evaluate((seq, error) => {
-                                if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
-                                    globalThis.$cdp.callback.errors[seq].value = error;
-                                }
-                            }, payload.sequence, error), promise]);
-                        } catch (error) {
-                            if (error instanceof Error) {
-                                error.message = error.message + `\t(sessionId: ${sessionId})`
-                                throw new Error(error.message);
-                            }
-                            throw error;
-                        }
-                        resolve();
+                    if (error instanceof Error) {
+                        error.message = error.message + `\t(sessionId: ${this.id})`
+                        throw new Error(error.message);
                     }
                 }
-
             }
         };
 
@@ -1515,80 +1502,47 @@ export class Session {
                         },
                         messageDetails: globalThis.Electron.MessageDetails
                     ) => {
-                        if (messageDetails.level === 0 && messageDetails.message.startsWith('cdp-utils-')) {
-                            const { id: currentId, type, sessionId, payload: payloadString } = JSON.parse(messageDetails.message.substring('cdp-utils-'.length)) as InvokeMessage;
-
-                            if (currentId !== id) {
+                        const parseMessage = () => {
+                            if (messageDetails.level !== 0 || !messageDetails.message.startsWith('cdp-utils-')) {
                                 return;
                             }
 
-                            if (type !== 'service-worker' || sessionId !== this.id) {
+                            const { id: currentId, type, sessionId, payload: payloadString } = JSON.parse(messageDetails.message.substring('cdp-utils-'.length)) as InvokeMessage;
+
+                            if (currentId !== id || type !== 'service-worker' || sessionId !== this.id) {
                                 return;
                             }
 
                             const payload: Payload = this.superJSON.parse(payloadString);
-                            if (payload.name === name) {
-                                const withReturnValue = options?.withReturnValue;
-                                const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
-                                try {
-                                    if (options?.retry) {
-                                        const { promise, resolve, reject } = Promise.withResolvers<void>();
-                                        if (timeout) {
-                                            setTimeout(reject, timeout);
-                                        }
-                                        await Promise.race([this.evaluate(seq => {
-                                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
-                                                globalThis.$cdp.callback.returnValues[seq].init = true;
-                                            }
-                                        }, payload.sequence), promise]);
-                                        resolve();
+                            if (payload.name !== name) {
+                                return;
+                            }
+                            return payload;
+                        };
+                        const payload = parseMessage();
+                        if (!payload) {
+                            return;
+                        }
+                        try {
+                            await init(this, payload.sequence);
+                            await resolve(this, payload.sequence, await fn(...payload.args));
+                        } catch (error) {
+                            try {
+                                await reject(this, payload.sequence, error);
+                            } catch (error) {
+                                if (error instanceof Error) {
+                                    if (error.message === 'Session with given id not found.') {
+                                        serviceWorkers.off('console-message', onServiceWorkerConsoleMessage);
                                     }
-                                    const ret = await fn(...payload.args);
-
-                                    if (withReturnValue) {
-                                        const { promise, resolve, reject } = Promise.withResolvers<void>();
-                                        if (timeout) {
-                                            setTimeout(reject, timeout);
-                                        }
-                                        await Promise.race([this.evaluate((seq, ret) => {
-                                            if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
-                                                globalThis.$cdp.callback.returnValues[seq].value = ret;
-                                            }
-                                        }, payload.sequence, ret), promise]);
-                                        resolve();
-                                    }
-                                } catch (error) {
-                                    if (withReturnValue) {
-                                        const { promise, resolve, reject } = Promise.withResolvers<void>();
-                                        if (timeout) {
-                                            setTimeout(reject, timeout);
-                                        }
-                                        try {
-                                            await Promise.race([this.evaluate((seq, error) => {
-                                                if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
-                                                    globalThis.$cdp.callback.errors[seq].value = error;
-                                                }
-                                            }, payload.sequence, error), promise]);
-                                        } catch (error) {
-                                            if (error instanceof Error) {
-                                                if (error.message === 'Session with given id not found.') {
-                                                    serviceWorkers.off('console-message', onServiceWorkerConsoleMessage);
-                                                }
-                                                error.message = error.message + `\t(sessionId: ${sessionId})`
-                                                throw new Error(error.message);
-                                            }
-                                            throw error;
-                                        }
-                                        resolve();
-                                    }
+                                    error.message = error.message + `\t(sessionId: ${this.id})`
+                                    throw new Error(error.message);
                                 }
+                                throw error;
                             }
                         }
                     };
 
-                    if (serviceWorkers.getMaxListeners() <= serviceWorkers.listenerCount('console-message')) {
-                        serviceWorkers.setMaxListeners(serviceWorkers.listenerCount('console-message') + 1);
-                    }
+                    increamentMaxListeners(serviceWorkers, 'console-message');
                     serviceWorkers.on('console-message', onServiceWorkerConsoleMessage);
                     removeHandler = () => { serviceWorkers.off('console-message', onServiceWorkerConsoleMessage) };
                     break;
@@ -1596,9 +1550,7 @@ export class Session {
                 case 'page':
                 case 'iframe':
                 case 'worker': {
-                    if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('console-message')) {
-                        this.webContents.setMaxListeners(this.webContents.listenerCount('console-message') + 1);
-                    }
+                    increamentMaxListeners(this.webContents, 'console-message');
                     this.webContents.on('console-message', onConsoleMessage);
                     removeHandler = () => { this.webContents.off('console-message', onConsoleMessage) };
                     break;
@@ -1611,30 +1563,34 @@ export class Session {
                     throw new Error(`Electron mode does not support target type: ${targetInfo.type}`);
             }
         }
-        if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('destroyed')) {
-            this.webContents.setMaxListeners(this.webContents.listenerCount('destroyed') + 1);
-        }
+        increamentMaxListeners(this.webContents, 'destroyed');
         this.webContents.on('destroyed', () => this.#exposeFunctions.delete(name));
+
+        const isUnexceptedError = (error: unknown) => error instanceof Error && (error.message !== 'target closed while handling command' && error.message !== 'Cannot find context with specified id')
+        const logUnexceptedError = (error: unknown, options?: { type: 'error' | 'warn' | 'info', message?: string }) => {
+            if (isUnexceptedError(error)) {
+                options ??= { type: 'error' };
+                console[options.type](...(options?.message ? [options?.message, error] : [error]));
+            }
+        }
 
         let entry;
         try {
-            if (targetInfo.type !== 'service_worker' && targetInfo.type !== 'worker' && targetInfo.type !== 'shared_worker') {
-                if ((await this.#domainsPr).find(d => d.name === 'Page')) {
-                    const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
-                        runImmediately: true,
-                        source: generateScriptString({ session: this }, attachFunction, id, name, options, this.id)
-                    })).identifier;
-                    entry = {
-                        scriptId,
-                        attach: () => this.evaluate(attachFunction, id, name, options, this.id),
-                        removeHandler
-                    };
-                }
+            if ((!targetInfo.type.endsWith('worker') && (await this.#domainsPr).some(d => d.name === 'Page'))) {
+                const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
+                    runImmediately: true,
+                    source: generateScriptString({ session: this }, attachFunction, id, name, options, this.id)
+                })).identifier;
+                entry = {
+                    scriptId,
+                    attach: () => this.evaluate(attachFunction, id, name, options, this.id),
+                    removeHandler
+                };
+                this.#exposeFunctions.set(name, entry);
+                return entry;
             }
         } catch (error) {
-            if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                console.trace(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
-            }
+            logUnexceptedError(error, { type: 'error', message: `[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :` });
         }
 
         /**
@@ -1648,88 +1604,73 @@ export class Session {
          *   Inject into existing frames immediately, and then hook 'frame-created'
          *   to inject into newly created frames.
          */
-        if (!entry) {
-            try {
-                await this.evaluate(attachFunction, id, name, options, this.id);
-            } catch (error) {
-                if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
+        await this.evaluate(attachFunction, id, name, options, this.id)
+            .catch(error => {
+                if (isUnexceptedError(error)) {
                     console.error(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
                 }
+            });
+
+        const promises: Promise<unknown>[] = [];
+
+        if (mode === 'CDP') {
+            for (const ctx of this.#executionContexts.values()) {
+                promises.push(ctx.evaluate(attachFunction, id, name, options, this.id).catch(error => {
+                    if (isUnexceptedError(error)) {
+                        console.error(error);
+                    }
+                }));
             }
 
-            const promises: Promise<unknown>[] = [];
-
-            if (mode === 'CDP') {
-                for (const ctx of this.#executionContexts.values()) {
-                    promises.push(ctx.evaluate(attachFunction, id, name, options, this.id).catch(error => {
-                        if ((error as Error).message !== 'target closed while handling command' && (error as Error).message !== 'Cannot find context with specified id') {
-                            console.debug(error);
-                        }
-                    }));
-                }
-
-                const executionContextCreated = async (context: ExecutionContext) => {
-                    try {
-                        await context.evaluate(attachFunction, id, name, options, this.id);
-                    } catch (error) {
-                        if ((error as Error).message !== 'Cannot find context with specified id') {
-                            console.debug(error);
-                        }
-                    }
-                };
-                if (this.#emitter.getMaxListeners() <= this.#emitter.listenerCount('execution-context-created')) {
-                    this.#emitter.setMaxListeners(this.#emitter.listenerCount('execution-context-created') + 1);
-                }
-                this.#emitter.prependListener('execution-context-created', executionContextCreated);
-                entry = {
-                    executionContextCreated,
-                    attach: () => this.evaluate(attachFunction, id, name, options, this.id),
-                    removeHandler
-                };
-            } else if (this.id === undefined) {
-                for (const frame of this.webContents.mainFrame.framesInSubtree) {
-                    try {
-                        if (frame.evaluate === undefined) {
-                            this.#patchWebFrameMain(frame);
-                        }
-                        promises.push(frame.evaluate(attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`));
-                    } catch (error) {
-                        console.debug(error);
+            const executionContextCreated = async (context: ExecutionContext) => {
+                try {
+                    await context.evaluate(attachFunction, id, name, options, this.id);
+                } catch (error) {
+                    if (isUnexceptedError(error)) {
+                        console.error(error);
                     }
                 }
+            };
 
-                const frameCreated = async (_: Electron.Event, details: Electron.FrameCreatedDetails) => {
-                    try {
-                        if (!details.frame) {
-                            return;
-                        }
-                        if (details.frame.evaluate === undefined) {
-                            this.#patchWebFrameMain(details.frame);
-                        }
-                        details.frame.evaluate(attachFunction, id, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
-                    } catch (error) {
-                        console.debug(error);
-                    }
-                };
-                if (this.webContents.getMaxListeners() <= this.webContents.listenerCount('frame-created')) {
-                    this.webContents.setMaxListeners(this.webContents.listenerCount('frame-created') + 1);
-                }
-                this.webContents.on('frame-created', frameCreated);
-                entry = {
-                    frameCreated,
-                    attach: () => this.webContents.mainFrame.evaluate(attachFunction, id, name, options, this.id),
-                    removeHandler
-                };
-            }
-            await Promise.allSettled(promises);
-        }
-
-        if (!entry) {
+            increamentMaxListeners(this.#emitter, 'execution-context-created');
+            this.#emitter.prependListener('execution-context-created', executionContextCreated);
             entry = {
+                executionContextCreated,
                 attach: () => this.evaluate(attachFunction, id, name, options, this.id),
                 removeHandler
             };
+        } else if (this.id === undefined) {
+            for (const frame of this.webContents.mainFrame.framesInSubtree) {
+                this.#patchWebFrameMain(frame);
+                promises.push(frame.evaluate(attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`));
+            }
+
+            const frameCreated = async (_: Electron.Event, details: Electron.FrameCreatedDetails) => {
+                try {
+                    if (!details.frame) {
+                        return;
+                    }
+                    this.#patchWebFrameMain(details.frame);
+                    details.frame.evaluate(attachFunction, id, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
+                } catch (error) {
+                    console.error(error);
+                }
+            };
+            increamentMaxListeners(this.#emitter, 'frame-created');
+            this.webContents.on('frame-created', frameCreated);
+            entry = {
+                frameCreated,
+                attach: () => this.webContents.mainFrame.evaluate(attachFunction, id, name, options, this.id),
+                removeHandler
+            };
         }
+        await Promise.allSettled(promises);
+
+
+        entry ??= {
+            attach: () => this.evaluate(attachFunction, id, name, options, this.id),
+            removeHandler
+        };
 
         this.#exposeFunctions.set(name, entry);
         return true;
@@ -1781,20 +1722,20 @@ export class Session {
 
         const promises = [];
         if (this.target.type === 'page' || this.target.type === 'iframe') {
-            promises.push(this.webContents.mainFrame.framesInSubtree.map(frame => {
-                if (frame.evaluate === undefined) {
-                    this.#patchWebFrameMain(frame);
-                }
+            promises.push(...this.webContents.mainFrame.framesInSubtree.map(frame => {
+                this.#patchWebFrameMain(frame);
                 // @ts-expect-error : globalThis[name]
                 return frame.evaluate(name => delete globalThis[name], name);
             }));
         }
 
-        // @ts-expect-error : globalThis[name]
-        promises.push(this.evaluate(name => delete globalThis[name], name));
+        promises.push(
+            // @ts-expect-error : globalThis[name]
+            this.evaluate(name => delete globalThis[name], name),
 
-        // @ts-expect-error : globalThis[name]
-        promises.push(Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name)));
+            // @ts-expect-error : globalThis[name]
+            ...Array.from(this.#executionContexts.values()).map(ctx => ctx.evaluate(name => delete globalThis[name], name))
+        );
 
         await Promise.allSettled(promises);
     }

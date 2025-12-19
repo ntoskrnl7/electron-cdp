@@ -5,7 +5,7 @@
   "license": "ISC",
   "main": "index.js",
   "scripts": {
-    "build": "tsc && tsc -p ./tsconfig.esm.json && esbuild src/superJSON.ts --bundle --outfile=esm/SuperJSON.browser.js --platform=browser --format=iife --global-name=SuperJSON --minify && node replace-raw-imports.mjs",
+    "build": "tsc && tsc -p ./tsconfig.esm.json && esbuild src/superJSON.browser.ts --bundle --outfile=esm/SuperJSON.browser.js --platform=browser --format=iife --global-name=SuperJSON --minify && node replace-raw-imports.mjs",
     "lint": "concurrently npm:lint:es npm:lint:ox",
     "lint:es": "eslint src/*.ts",
     "lint:ox": "oxlint src",
@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "buffer": "^6.0.3",
-    "devtools-protocol": "^0.0.1558402",
+    "devtools-protocol": "^0.0.1560991",
     "events": "^3.3.0",
     "superjson": "2.2.6"
   },
@@ -21,9 +21,9 @@
     "@babel/preset-typescript": "^7.28.5",
     "concurrently": "^9.2.1",
     "electron": "^39.2.4",
-    "esbuild": "^0.27.1",
+    "esbuild": "^0.27.2",
     "eslint": "^9.39.2",
-    "oxlint": "^1.33.0",
+    "oxlint": "^1.34.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.50.0"
   },

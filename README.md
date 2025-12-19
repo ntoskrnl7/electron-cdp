@@ -308,8 +308,7 @@ const result = await session.evaluate((data) => {
 }, {
   map: new Map([['key', 'value']]),
   set: new Set([1, 2, 3]),
-  date: new Date(),
-  buffer: Buffer.from('hello')
+  date: new Date()
 });
 ```
 
