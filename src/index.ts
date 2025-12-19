@@ -1,8 +1,6 @@
 import { Protocol } from 'devtools-protocol/types/protocol.d';
-export { Protocol };
-
-import SuperJSON from './superJSON';
-export { SuperJSON };
+export { Protocol } from 'devtools-protocol/types/protocol.d';
+export { SuperJSON } from 'superjson';
 
 export type EvaluateOptions = Omit<Protocol.Runtime.EvaluateRequest, 'contextId' | 'uniqueContextId' | 'expression' | 'throwOnSideEffect' | 'awaitPromise' | 'replMode' | 'returnByValue' | 'generatePreview' | 'serializationOptions' | 'objectGroup'>;
 

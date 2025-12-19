@@ -1,5 +1,4 @@
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
 
 const superJSONContent = fs.readFileSync('./esm/SuperJSON.browser.js', 'utf-8');
 
@@ -21,9 +20,9 @@ cjsFiles.forEach(fileName => {
     let fileContent = fs.readFileSync(`./${fileName}`, 'utf-8');
 
     const escapedContent = superJSONContent
-      .replace(/\\/g, '\\\\')
-      .replace(/`/g, '\\`')
-      .replace(/\$/g, '\\$');
+      .replaceAll('\\', '\\\\')
+      .replaceAll('`', '\\`')
+      .replaceAll('$', String.raw`\$`);
 
     fileContent = fileContent.replace(
       /const (\w+) = (__importDefault\w*)\(require\(".\/superJSON\.browser\.js\?raw"\)\);/,

@@ -1,6 +1,6 @@
-import { applyPolyfill } from "./global";
-import { Session } from "./session";
-import { SuperJSON } from ".";
+import { applyPolyfill } from './global';
+import { Session } from './session';
+import { SuperJSON } from 'superjson';
 
 import superJSONBrowserScript from './superJSON.browser.js?raw';
 
@@ -57,7 +57,7 @@ export function generateScriptString<T, A extends unknown[]>(options: ({ session
 
             `
             ${superJSONBrowserScript};
-            (${options?.session ? options.session.customizeSuperJSON.toString() : () => { }})(SuperJSON.default); (globalThis.$cdp ??= { consoleDebug: console.debug }).superJSON = SuperJSON.default;
+            (${options?.session?.customizeSuperJSON.toString() ?? (() => { })})(SuperJSON.default); (globalThis.$cdp ??= { consoleDebug: console.debug }).superJSON = SuperJSON.default;
             `
         )
         +
