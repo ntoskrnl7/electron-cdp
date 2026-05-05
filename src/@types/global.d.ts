@@ -4,6 +4,7 @@ type ExposeFunctionId = `expose-function-${ReturnType<typeof crypto.randomUUID>}
 type FrameId = import('../session').FrameId;
 type SessionID = import('devtools-protocol').Protocol.Target.SessionID;
 
+// eslint-disable-next-line no-shadow-restricted-names
 namespace globalThis {
     // eslint-disable-next-line no-var
     var $cdp: {

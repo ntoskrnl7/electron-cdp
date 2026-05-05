@@ -239,7 +239,15 @@ type ExposeFunction =
             executionContextCreated: (context: ExecutionContext) => Promise<void>;
         },
         {
-            frameCreated: (event: Electron.Event, details: Electron.FrameCreatedDetails) => void
+            didFrameNavigate: (
+                event: Electron.Event,
+                url: string,
+                httpResponseCode: number,
+                httpStatusText: string,
+                isMainFrame: boolean,
+                frameProcessId: number,
+                frameRoutingId: number
+            ) => void
         },
         {
             scriptId: Protocol.Page.ScriptIdentifier;
@@ -1002,11 +1010,10 @@ export class Session {
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
             console.error('[Session.enableSuperJSON] Failed to inject code :', error);
-            increamentMaxListeners(this.webContents, 'frame-created');
-            this.webContents.on('frame-created', (_, details) => details.frame?.executeJavaScript(source).catch(console.error));
-            for (const frame of this.webContents.mainFrame.framesInSubtree) {
-                frame.executeJavaScript(source).catch(console.error);
-            }
+            increamentMaxListeners(this.webContents, 'did-frame-navigate');
+            this.webContents.on('did-frame-navigate', (_, __, ___, ____, _____, frameProcessId, frameRoutingId) => {
+                webFrameMain.fromId(frameProcessId, frameRoutingId)?.executeJavaScript(source).catch(console.error);
+            });
         }
 
         const buildParams = () => ({
@@ -1601,8 +1608,8 @@ export class Session {
          *   and also attach a listener to inject into *future* contexts as they are created.
          *
          * - Electron mode (main session only, i.e., this.id === undefined):
-         *   Inject into existing frames immediately, and then hook 'frame-created'
-         *   to inject into newly created frames.
+         *   Inject into existing frames immediately, and then hook 'did-frame-navigate'
+         *   to avoid touching frame contexts before Electron preload injection.
          */
         await this.evaluate(attachFunction, id, name, options, this.id)
             .catch(error => {
@@ -1645,21 +1652,30 @@ export class Session {
                 promises.push(frame.evaluate(attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`));
             }
 
-            const frameCreated = async (_: Electron.Event, details: Electron.FrameCreatedDetails) => {
+            const didFrameNavigate = async (
+                _: Electron.Event,
+                __: string,
+                ___: number,
+                ____: string,
+                _____: boolean,
+                frameProcessId: number,
+                frameRoutingId: number
+            ) => {
                 try {
-                    if (!details.frame) {
+                    const frame = webFrameMain.fromId(frameProcessId, frameRoutingId);
+                    if (!frame) {
                         return;
                     }
-                    this.#patchWebFrameMain(details.frame);
-                    details.frame.evaluate(attachFunction, id, name, options, this.id, `${details.frame.processId}-${details.frame.routingId}`);
+                    this.#patchWebFrameMain(frame);
+                    frame.evaluate(attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`);
                 } catch (error) {
                     console.error(error);
                 }
             };
-            increamentMaxListeners(this.#emitter, 'frame-created');
-            this.webContents.on('frame-created', frameCreated);
+            increamentMaxListeners(this.webContents, 'did-frame-navigate');
+            this.webContents.on('did-frame-navigate', didFrameNavigate);
             entry = {
-                frameCreated,
+                didFrameNavigate,
                 attach: () => this.webContents.mainFrame.evaluate(attachFunction, id, name, options, this.id),
                 removeHandler
             };
@@ -1716,8 +1732,8 @@ export class Session {
             await this.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: entry.scriptId });
         } else if ('executionContextCreated' in entry) {
             this.#emitter.off('execution-context-created', entry.executionContextCreated);
-        } else if ('frameCreated' in entry) {
-            this.webContents.off('frame-created', entry.frameCreated);
+        } else if ('didFrameNavigate' in entry) {
+            this.webContents.off('did-frame-navigate', entry.didFrameNavigate);
         }
 
         const promises = [];

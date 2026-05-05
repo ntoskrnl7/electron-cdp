@@ -105,19 +105,10 @@ export class MainSession extends CDPSession {
 
         const webContents = this.webContents;
         initializeFrame(this, webContents.mainFrame);
-
-        if (webContents.getMaxListeners() <= webContents.listenerCount('frame-created')) {
-            webContents.setMaxListeners(webContents.listenerCount('frame-created') + 1);
-        }
-        if (webContents.getMaxListeners() <= webContents.listenerCount('will-frame-navigate')) {
-            webContents.setMaxListeners(webContents.listenerCount('will-frame-navigate') + 1);
-        }
         if (webContents.getMaxListeners() <= webContents.listenerCount('did-frame-navigate')) {
             webContents.setMaxListeners(webContents.listenerCount('did-frame-navigate') + 1);
         }
         webContents
-            .on('frame-created', async (_, details) => initializeFrame(this, details.frame))
-            .on('will-frame-navigate', details => initializeFrame(this, details.frame))
             .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) =>
                 initializeFrame(this, webFrameMain.fromId(frameProcessId, frameRoutingId)));
 

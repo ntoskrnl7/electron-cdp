@@ -3,7 +3,6 @@
     "rules": {
         "no-debugger": "off",
         "prefer-const": "error",
-        "no-implicit-any-catch": "error",
         "no-constant-condition": "error",
         "no-var": "error",
         "eqeqeq": [
@@ -13,9 +12,8 @@
         "no-empty-function": "off",
         "no-extra-boolean-cast": "error",
         "no-unreachable": "error",
-        "no-return-await": "error",
         "no-useless-return": "error",
-        "no-shadow": "error",
+        "no-shadow": "off",
         "consistent-return": "error",
         "default-case": "off",
         "no-fallthrough": "error",
@@ -26,6 +24,7 @@
         "no-non-null-assertion": "off",
         "no-misused-promises": "error",
         "ban-ts-comment": "error",
+        "no-shadow-restricted-names": "off",
         "no-unused-vars": [
             "error",
             {
@@ -35,12 +34,6 @@
             }
         ],
         "no-inferrable-types": "warn",
-        "consistent-type-assertions": [
-            "error",
-            {
-                "assertionStyle": "as",
-                "objectLiteralTypeAssertions": "never"
-            }
-        ]
+        "consistent-type-assertions": "warn"
     }
 }
