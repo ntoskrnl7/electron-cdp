@@ -9,6 +9,9 @@
     "lint": "concurrently npm:lint:es npm:lint:ox",
     "lint:es": "eslint src/*.ts",
     "lint:ox": "oxlint src",
+    "test": "npm run test:mock",
+    "test:mock": "node --test test/mock/*.test.cjs",
+    "test:e2e": "node --test test/e2e/*.test.cjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
