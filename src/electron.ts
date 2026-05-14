@@ -4,7 +4,7 @@ import type Protocol from 'devtools-protocol';
 
 import { WebContents, webFrameMain, WebFrameMain } from 'electron';
 import { Session as CDPSession, SessionOptions } from './session';
-import { generateScriptString } from './utils';
+import { type GenerateScriptOptions, type WebFrameEvaluateOptions, type WebFramePatchOptions, patchWebFrameMain } from './utils';
 import SuperJSON from 'superjson';
 
 declare global {
@@ -33,6 +33,14 @@ declare global {
             evaluate<A extends unknown[], R>(userGesture: boolean, fn: (...args: A) => R, ...args: A): Promise<R>;
 
             /**
+             * A promise that resolves with the result of the executed code or is rejected if
+             * execution throws or results in a rejected promise.
+             *
+             * Evaluates `fn(...args)` in page with per-call frame evaluation options.
+             */
+            evaluate<A extends unknown[], R>(options: WebFrameEvaluateOptions, fn: (...args: A) => R, ...args: A): Promise<R>;
+
+            /**
               * A promise that resolves with the result of the executed code or is rejected if
               * execution throws or results in a rejected promise.
               *
@@ -49,17 +57,23 @@ export class MainSession extends CDPSession {
     }
 
     /**
-     * Sets up the session.
-     * 
+     * Sets up the main Electron session.
+     *
+     * The setup process applies session options, optionally preloads SuperJSON,
+     * patches `WebFrameMain.evaluate` on existing and newly created frames, and
+     * injects the frame-id helper used by exposed functions.
+     *
      * @param options - Configuration options object.
      * @param options.preloadSuperJSON - If true, SuperJSON will be loaded into all contexts upfront.
      *                                   If false, SuperJSON will only be loaded during evaluate calls.
-     *                                   This can also be a callback function to customize the SuperJSON instance.  
+     *                                   This can also be a callback function to customize the SuperJSON instance.
+     * @param options.timeout - Maximum wait time, in milliseconds, for patched frame evaluate calls to find a preloaded SuperJSON instance.
+     * @param options.initScript - Script body or function body to run at the beginning of each patched `WebFrameMain.evaluate` call.
      * @param options.trackExecutionContexts - Whether to track Runtime execution context and maintain a map of them in the `executionContexts` property.
      * @param options.autoAttachToRelatedTargets - Whether to automatically attach to related targets.
-     * @returns A promise that resolves when the session is setup.
+     * @returns A promise that resolves when the session is set up.
      */
-    async setup(options?: { preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void) } & SessionOptions) {
+    async setup(options?: { preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void) } & Omit<GenerateScriptOptions, 'session'> & SessionOptions) {
 
         const promises = [];
         promises.push(this.applyOptions(options));
@@ -69,29 +83,8 @@ export class MainSession extends CDPSession {
             promises.push(this.enableSuperJSONPreload(typeof preloadSuperJSON === 'boolean' ? undefined : preloadSuperJSON));
         }
 
-        const initializeFrame = async (session: CDPSession, frame: WebFrameMain | undefined | null) => {
+        const applyFrameId = async (frame: WebFrameMain | undefined | null) => {
             if (frame && !frame.isDestroyed()) {
-                frame.evaluate = async function <A0, A extends unknown[], R>(this: WebFrameMain, userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> {
-                    try {
-                        if (typeof userGestureOrFn === 'boolean') {
-                            return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
-                        } else {
-                            return session.superJSON.parse(await (this.executeJavaScript(generateScriptString({ session }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
-                        }
-                    } catch (error) {
-                        if (typeof error === 'string') {
-                            let result;
-                            try {
-                                result = session.superJSON.parse(error);
-                            } catch {
-                            }
-                            if (result) {
-                                throw result;
-                            }
-                        }
-                        throw error;
-                    }
-                }
                 await frame.executeJavaScript(`
                     globalThis.$cdp ??= { consoleDebug: console.debug };
                     if (globalThis.$cdp.frameIdResolve) {
@@ -103,25 +96,49 @@ export class MainSession extends CDPSession {
             }
         };
 
+        const frameEvaluateOptions: WebFramePatchOptions = {
+            initScript: options?.initScript,
+            timeout: options?.timeout
+        };
+
+        const patchFrame = (frame: WebFrameMain | undefined | null) => {
+            if (frame && !frame.isDestroyed()) {
+                patchWebFrameMain(this, frame, frameEvaluateOptions);
+            }
+        };
+
         const webContents = this.webContents;
-        initializeFrame(this, webContents.mainFrame);
+        patchFrame(webContents.mainFrame);
+        applyFrameId(webContents.mainFrame);
         if (webContents.getMaxListeners() <= webContents.listenerCount('did-frame-navigate')) {
             webContents.setMaxListeners(webContents.listenerCount('did-frame-navigate') + 1);
         }
         webContents
-            .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) =>
-                initializeFrame(this, webFrameMain.fromId(frameProcessId, frameRoutingId)));
+            .on('frame-created', (event, details) => {
+                patchFrame(details.frame);
+            });
+        webContents
+            .on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => {
+                const frame = webFrameMain.fromId(frameProcessId, frameRoutingId);
+                patchFrame(frame);
+                applyFrameId(frame);
+            });
 
-        promises.push(this.send('Page.addScriptToEvaluateOnNewDocument', {
-            runImmediately: true,
-            source: `
-            globalThis.$cdp ??= { consoleDebug: console.debug };
-            if (globalThis.$cdp.frameId === undefined) {
-                const { promise, resolve } = Promise.withResolvers();
-                globalThis.$cdp.frameId = promise;
-                globalThis.$cdp.frameIdResolve = resolve;
-            }`
-        }));
+        promises.push((async () => {
+            if ((await this.getDomains()).some(domain => domain.name === 'Page')) {
+                await this.send('Page.enable');
+            }
+            await this.send('Page.addScriptToEvaluateOnNewDocument', {
+                runImmediately: true,
+                source: `
+                globalThis.$cdp ??= { consoleDebug: console.debug };
+                if (globalThis.$cdp.frameId === undefined) {
+                    const { promise, resolve } = Promise.withResolvers();
+                    globalThis.$cdp.frameId = promise;
+                    globalThis.$cdp.frameIdResolve = resolve;
+                }`
+            });
+        })());
 
         await Promise.all(promises);
     }

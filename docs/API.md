@@ -36,8 +36,10 @@ Configures the session with comprehensive options.
 
 **Options:**
 - `preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void)` - SuperJSON configuration
+- `initScript?: (() => void) | string` - Script body to run before each generated `WebFrameMain.evaluate` wrapper
+- `timeout?: number` - Maximum wait time, in milliseconds, for a preloaded SuperJSON instance
 - `trackExecutionContexts?: boolean` - Enable execution context tracking
-- `autoAttachToRelatedTargets?: boolean | TargetType[]` - Auto attachment configuration
+- `autoAttachToRelatedTargets?: boolean | Target['type'][]` - Auto attachment configuration
 
 **Behavior:**
 - Sets up WebFrameMain integration
@@ -51,6 +53,8 @@ Configures the session with comprehensive options.
 const session = new MainSession(window.webContents, undefined, '1.3');
 await session.setup({
   preloadSuperJSON: true,
+  initScript: 'globalThis.__cdpSetup = true;',
+  timeout: 3000,
   trackExecutionContexts: true,
   autoAttachToRelatedTargets: ['iframe', 'worker', 'service_worker']
 });
@@ -59,6 +63,27 @@ await session.setup({
 ### Properties
 
 Inherits all properties from the base `Session` class.
+
+### Patched `WebFrameMain.evaluate`
+
+`MainSession.setup()` patches Electron frames with a typed `evaluate` helper. The helper accepts the existing boolean-first user-gesture form and a new object-options form.
+
+```ts
+// Existing boolean-first form
+await webContents.mainFrame.evaluate(true, () => {
+  return document.documentElement.requestFullscreen();
+});
+
+// Options-object form
+const ready = await webContents.mainFrame.evaluate({
+  userGesture: true,
+  initScript: 'globalThis.__frameReady = true;'
+}, () => {
+  return globalThis.__frameReady;
+});
+```
+
+The options-object form accepts `userGesture`, top-level script-generation options such as `initScript` and `timeout`, and the nested `{ script }` shape used by `Session.evaluate`.
 
 ## Session Class
 
@@ -92,9 +117,13 @@ Sends a command to the browser's DevTools protocol with full type safety.
 
 **Examples:**
 ```ts
-// Page commands
+// Page and Runtime commands
 await session.send('Page.enable');
-const title = await session.send('Page.getTitle');
+const titleResponse = await session.send('Runtime.evaluate', {
+  expression: 'document.title',
+  returnByValue: true
+});
+const title = titleResponse.result.value;
 
 // Runtime commands with parameters
 const result = await session.send('Runtime.evaluate', {
@@ -109,7 +138,12 @@ const response: Protocol.Runtime.EvaluateResponse = await session.send('Runtime.
 });
 ```
 
-#### `evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>`
+#### `evaluate`
+
+```ts
+evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
+evaluate<T, A extends unknown[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
+```
 
 Executes a function in the browser context with full type safety and SuperJSON serialization.
 
@@ -118,6 +152,7 @@ Executes a function in the browser context with full type safety and SuperJSON s
 - `A` - The argument types of the function
 
 **Parameters:**
+- `options` - CDP `Runtime.evaluate` options plus nested script-generation options, when using the options overload
 - `fn` - The function to execute in the browser context
 - `...args` - Arguments to pass to the function (automatically serialized with SuperJSON)
 
@@ -147,9 +182,19 @@ const result = await session.evaluate((userData: { name: string; createdAt: Date
     processedAt: new Date()
   };
 }, { name: 'John', createdAt: new Date() });
+
+// Script-generation options for this call only
+const flag = await session.evaluate({
+  script: {
+    initScript: 'globalThis.__beforeEvaluate = true;',
+    timeout: 3000
+  }
+}, () => {
+  return globalThis.__beforeEvaluate;
+});
 ```
 
-#### `exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions): Promise<void>`
+#### `exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions): Promise<boolean>`
 
 Exposes a Node.js function to the browser's global context with advanced options.
 
@@ -162,10 +207,14 @@ Exposes a Node.js function to the browser's global context with advanced options
 - `fn` - The function to expose (can be async or sync)
 - `options` - Optional settings for exposing the function
 
+**Returns:** Promise that resolves to `true` when the function is exposed, or `false` when it is already exposed and `overwrite` is not enabled.
+
 **Options:**
 - `mode?: 'Electron' | 'CDP'` - Detection method (default: 'Electron')
 - `withReturnValue?: boolean | WithReturnValueOptions` - Whether to await return values
 - `retry?: boolean | RetryOptions` - Retry configuration for failed calls
+- `overwrite?: boolean` - Replace an existing exposed function with the same name
+- `script?: Omit<GenerateScriptOptions, 'session'>` - Script-generation options used while installing or updating the browser-side bridge
 
 **Throws:**
 - `Error` - If function exposure fails
@@ -188,7 +237,10 @@ await session.exposeFunction('complexOperation', async (data: any) => {
 }, {
   mode: 'CDP',
   withReturnValue: true,
-  retry: { count: 3, delay: 1000 }
+  retry: { count: 3, delay: 1000 },
+  script: {
+    initScript: 'globalThis.__nativeBridgeInstall = true;'
+  }
 });
 
 // Nested function exposure
@@ -265,7 +317,7 @@ Enables automatic attachment to related targets like iframes, workers, and other
 - `options` - Optional settings for auto attachment
 
 **Options:**
-- `targetTypes?: TargetType[]` - Specific target types to attach to
+- `targetTypes?: Target['type'][]` - Specific target types to attach to
 - `recursive?: boolean` - Whether to recursively attach to targets created by attached targets
 
 **Returns:** Promise that resolves to `true` if enabled, `false` if already enabled
@@ -386,11 +438,17 @@ constructor(session: Session, idOrDescription?: Protocol.Runtime.ExecutionContex
 
 ### Methods
 
-#### `evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>`
+#### `evaluate`
+
+```ts
+evaluate<T, A extends unknown[]>(fn: (...args: A) => T, ...args: A): Promise<T>;
+evaluate<T, A extends unknown[]>(options: EvaluateOptions, fn: (...args: A) => T, ...args: A): Promise<T>;
+```
 
 Executes a function in the specific execution context.
 
 **Parameters:**
+- `options` - CDP `Runtime.evaluate` options plus nested script-generation options, when using the options overload
 - `fn` - The function to execute
 - `...args` - Arguments to pass to the function
 
@@ -401,6 +459,14 @@ Executes a function in the specific execution context.
 const context = session.executionContexts.get(contextId);
 const result = await context.evaluate(() => {
   return window.location.href;
+});
+
+const seeded = await context.evaluate({
+  script: {
+    initScript: 'globalThis.__contextSeed = 1;'
+  }
+}, () => {
+  return globalThis.__contextSeed;
 });
 ```
 
@@ -477,7 +543,82 @@ if (isAttached(window.webContents)) {
 }
 ```
 
+### `patchWebFrameMain`
+
+```ts
+patchWebFrameMain(session: Session, frame: WebFrameMain, options?: WebFramePatchOptions): WebFrameMain
+```
+
+Installs the typed `evaluate` helper on an Electron `WebFrameMain`.
+
+`MainSession.setup()` applies this automatically to existing and newly created frames, so most applications do not need to call it directly.
+
+**Parameters:**
+- `session` - Session used for SuperJSON serialization and script generation
+- `frame` - Electron frame to patch
+- `options` - Default script-generation options for the patched frame
+
+**Examples:**
+```ts
+const frame = patchWebFrameMain(session, webContents.mainFrame, {
+  initScript: 'globalThis.__patchedFrame = true;'
+});
+
+const result = await frame.evaluate({
+  userGesture: true
+}, () => {
+  return globalThis.__patchedFrame;
+});
+```
+
 ## Type Definitions
+
+### `GenerateScriptOptions`
+
+Options used while building the browser-side wrapper script for evaluate calls.
+
+```ts
+type GenerateScriptOptions = {
+  session?: Session;
+  timeout?: number;
+  initScript?: (() => void) | string;
+};
+```
+
+**Properties:**
+- `session` - Internal session used for SuperJSON customization and serialization
+- `timeout` - Maximum wait time, in milliseconds, for a preloaded SuperJSON instance
+- `initScript` - Script body or function body to run before the generated evaluate wrapper setup
+
+### `WebFrameEvaluateOptions`
+
+Options accepted by `WebFrameMain.evaluate` when its first argument is an object.
+
+```ts
+type WebFrameEvaluateOptions = Omit<GenerateScriptOptions, 'session'> & {
+  userGesture?: boolean;
+  script?: Omit<GenerateScriptOptions, 'session'>;
+};
+```
+
+Use top-level `initScript` and `timeout` for direct frame calls. The nested `script` form is also accepted so internal call sites can reuse the same shape as `Session.evaluate`.
+
+```ts
+await frame.evaluate({
+  userGesture: true,
+  initScript: 'globalThis.__frameReady = true;'
+}, () => globalThis.__frameReady);
+```
+
+### `WebFramePatchOptions`
+
+Default options installed by `patchWebFrameMain` for patched frame evaluate calls.
+
+```ts
+type WebFramePatchOptions = Omit<GenerateScriptOptions, 'session'> & {
+  overwrite?: boolean;
+};
+```
 
 ### `SessionWithId`
 
@@ -530,8 +671,10 @@ Options for setting up a MainSession.
 ```ts
 interface MainSessionSetupOptions {
   preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void);
+  initScript?: (() => void) | string;
+  timeout?: number;
   trackExecutionContexts?: boolean;
-  autoAttachToRelatedTargets?: boolean | TargetType[];
+  autoAttachToRelatedTargets?: boolean | Target['type'][];
 }
 ```
 
@@ -543,8 +686,7 @@ Options for creating a Session.
 interface SessionOptions {
   protocolVersion?: string;
   trackExecutionContexts?: boolean;
-  autoAttachToRelatedTargets?: boolean | TargetType[];
-  preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void);
+  autoAttachToRelatedTargets?: boolean | Target['type'][];
 }
 ```
 
@@ -554,7 +696,7 @@ Options for setting auto attach.
 
 ```ts
 interface SetAutoAttachOptions {
-  targetTypes?: TargetType[];
+  targetTypes?: Target['type'][];
   recursive?: boolean;
 }
 ```
@@ -568,6 +710,8 @@ interface ExposeFunctionOptions {
   mode?: 'Electron' | 'CDP';
   withReturnValue?: boolean | WithReturnValueOptions;
   retry?: boolean | RetryOptions;
+  overwrite?: boolean;
+  script?: Omit<GenerateScriptOptions, 'session'>;
 }
 ```
 
@@ -587,7 +731,9 @@ type EvaluateOptions = Omit<Protocol.Runtime.EvaluateRequest,
   | 'generatePreview' 
   | 'serializationOptions' 
   | 'objectGroup'
->;
+> & {
+  script?: Omit<GenerateScriptOptions, 'session'>;
+};
 ```
 
 **Available Options:**
@@ -595,9 +741,9 @@ type EvaluateOptions = Omit<Protocol.Runtime.EvaluateRequest,
 - `silent?: boolean` - Whether to suppress console output
 - `includeCommandLineAPI?: boolean` - Whether to include command line API
 - `userGesture?: boolean` - Whether to treat as user gesture
-- `awaitPromise?: boolean` - Whether to await promises (always true)
-- `returnByValue?: boolean` - Whether to return by value (always false)
-- `generatePreview?: boolean` - Whether to generate preview (always false)
+- `script?: Omit<GenerateScriptOptions, 'session'>` - Script-generation options for this evaluate call
+
+`EvaluateOptions.timeout` is forwarded to CDP `Runtime.evaluate`. `EvaluateOptions.script.timeout` controls how long the generated wrapper waits for a preloaded SuperJSON instance.
 
 ### `WithReturnValueOptions`
 
@@ -668,8 +814,8 @@ session.on('Page.loadEventFired', () => {
 Emitted when a new session is attached.
 
 ```ts
-session.on('session-attached', (newSession: SessionWithId, url: string) => {
-  console.log('New session attached:', newSession.id, url);
+session.on('session-attached', (newSession: SessionWithId, initializationTasks: Promise<unknown>[]) => {
+  console.log('New session attached:', newSession.id, initializationTasks.length);
 });
 ```
 
@@ -713,14 +859,13 @@ session.on('execution-contexts-cleared', () => {
 });
 ```
 
-#### `service-worker-running-status-changed`
+#### `service-worker-restarted`
 
-Emitted when a service worker's running status changes.
+Emitted when an attached service worker restarts after it was stopped.
 
 ```ts
-session.on('service-worker-running-status-changed', (event: { runningStatus: string; versionId: number }, session: SessionWithId) => {
-  console.log('Service worker status changed:', event.runningStatus);
-  console.log('Version ID:', event.versionId);
+session.on('service-worker-restarted', (session: SessionWithId) => {
+  console.log('Service worker restarted:', session.id);
 });
 ```
 

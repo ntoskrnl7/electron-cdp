@@ -1,6 +1,6 @@
 {
   "name": "electron-cdp-utils",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "author": "ntoskrnl7@gmail.com",
   "license": "ISC",
   "main": "index.js",
@@ -9,26 +9,26 @@
     "lint": "concurrently npm:lint:es npm:lint:ox",
     "lint:es": "eslint src/*.ts",
     "lint:ox": "oxlint src",
-    "test": "npm run test:mock",
+    "test": "npm run build && npm run test:mock && npm run test:e2e",
     "test:mock": "node --test test/mock/*.test.cjs",
     "test:e2e": "node --test test/e2e/*.test.cjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "buffer": "^6.0.3",
-    "devtools-protocol": "^0.0.1624250",
+    "devtools-protocol": "^0.0.1629771",
     "events": "^3.3.0",
     "superjson": "2.2.6"
   },
   "devDependencies": {
     "@babel/preset-typescript": "^7.28.5",
     "concurrently": "^9.2.1",
-    "electron": "^41.5.0",
+    "electron": "^42.0.1",
     "esbuild": "^0.28.0",
     "eslint": "^10.3.0",
-    "oxlint": "^1.62.0",
+    "oxlint": "^1.64.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.59.2"
+    "typescript-eslint": "^8.59.3"
   },
   "sideEffects": [
     "SuperJSON.browser.js"
