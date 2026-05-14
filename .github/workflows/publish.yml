@@ -6,6 +6,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -41,12 +44,23 @@ jobs:
         # Get current version from package.json
         CURRENT_VERSION=$(node -p "require('./package.json').version")
         echo "Current version: $CURRENT_VERSION"
+        echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
         
         # Check if this is a tag push
         if [[ $GITHUB_REF == refs/tags/* ]]; then
-          echo "This is a tag push, will publish"
-          echo "should_publish=true" >> $GITHUB_OUTPUT
-          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$TAG_VERSION" != "$CURRENT_VERSION" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $CURRENT_VERSION"
+            exit 1
+          fi
+
+          if npm view "electron-cdp-utils@$CURRENT_VERSION" version >/dev/null 2>&1; then
+            echo "Version $CURRENT_VERSION is already published, skipping publish"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          else
+            echo "This is a tag push for an unpublished version, will publish"
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          fi
         else
           # Check if package.json version is higher than latest published
           LATEST_VERSION=$(npm view electron-cdp-utils version 2>/dev/null || echo "0.0.0")
@@ -56,7 +70,6 @@ jobs:
           if node -e "const semver = require('semver'); process.exit(semver.gt('$CURRENT_VERSION', '$LATEST_VERSION') ? 0 : 1)"; then
             echo "Version $CURRENT_VERSION is higher than $LATEST_VERSION, will publish"
             echo "should_publish=true" >> $GITHUB_OUTPUT
-            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
           else
             echo "Version $CURRENT_VERSION is not higher than $LATEST_VERSION, skipping publish"
             echo "should_publish=false" >> $GITHUB_OUTPUT
@@ -68,15 +81,27 @@ jobs:
       run: npm publish
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    - name: Check if GitHub Release exists
+      if: startsWith(github.ref, 'refs/tags/')
+      id: release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
     
     - name: Create GitHub Release
-      if: steps.should-publish.outputs.should_publish == 'true' && startsWith(github.ref, 'refs/tags/')
+      if: startsWith(github.ref, 'refs/tags/') && steps.release.outputs.exists == 'false'
       uses: actions/create-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ steps.should-publish.outputs.version }}
+        tag_name: ${{ github.ref_name }}
+        release_name: Release v${{ steps.should-publish.outputs.version }}
         body: |
           ## Changes in v${{ steps.should-publish.outputs.version }}
           
