@@ -164,6 +164,16 @@ const data = await session.evaluate((userData: { name: string; createdAt: Date }
     processedAt: new Date()
   };
 }, { name: 'John', createdAt: new Date() });
+
+// With script-generation options
+const value = await session.evaluate({
+  script: {
+    initScript: 'globalThis.__evaluateStarted = true;',
+    timeout: 3000
+  }
+}, () => {
+  return globalThis.__evaluateStarted;
+});
 ```
 
 ### Execution Contexts
@@ -202,8 +212,8 @@ session.on('execution-context-created', (context) => {
 });
 
 // Listen to session lifecycle events
-session.on('session-attached', (newSession, url) => {
-  console.log('New session attached:', newSession.id, url);
+session.on('session-attached', (newSession) => {
+  console.log('New session attached:', newSession.id);
 });
 
 session.on('session-detached', (detachedSession, reason) => {
@@ -231,7 +241,10 @@ await session.exposeFunction('complexOperation', async (data: any) => {
 }, {
   mode: 'CDP',
   withReturnValue: true,
-  retry: { count: 3, delay: 1000 }
+  retry: { count: 3, delay: 1000 },
+  script: {
+    initScript: 'globalThis.__bridgeReady = true;'
+  }
 });
 ```
 
@@ -244,23 +257,27 @@ The `MainSession.setup()` method provides comprehensive configuration:
 ```ts
 const session = attach(window.webContents, '1.3');
 await session.setup({
-  // SuperJSON configuration
-  preloadSuperJSON: true, // or a custom function
+  // Preload SuperJSON into browser contexts. Use true for the default instance,
+  // or provide a function to customize it before injection.
   preloadSuperJSON: (superJSON) => {
-    // Customize SuperJSON instance
     superJSON.registerCustom({
       isApplicable: (v) => v instanceof MyClass,
       serialize: (v) => v.toJSON(),
       deserialize: (v) => MyClass.fromJSON(v)
     });
   },
+
+  // Default script-generation options for patched WebFrameMain.evaluate calls.
+  // Per-call options can still override these values.
+  initScript: 'globalThis.__cdpSetup = true;',
+  timeout: 3000,
   
   // Execution context tracking
   trackExecutionContexts: true,
   
-  // Auto target attachment
-  autoAttachToRelatedTargets: true, // all targets
-  autoAttachToRelatedTargets: ['iframe', 'worker', 'service_worker'], // specific types
+  // Auto target attachment. Use true for all related targets,
+  // or pass specific target types.
+  autoAttachToRelatedTargets: ['iframe', 'worker', 'service_worker'],
 });
 ```
 
@@ -275,9 +292,8 @@ await session.setup({
 });
 
 // Listen for service worker events
-session.on('service-worker-running-status-changed', (event, session) => {
-  console.log('Service worker status:', event.runningStatus);
-  console.log('Version ID:', event.versionId);
+session.on('service-worker-restarted', (session) => {
+  console.log('Service worker restarted:', session.id);
 });
 
 session.on('service-worker-version-updated', (version, session) => {
@@ -327,6 +343,19 @@ const frame = webFrameMain.fromId(processId, routingId);
 const result = await frame.evaluate(() => {
   return document.title;
 });
+
+// Pass a user gesture, preserving the existing boolean-first form
+await frame.evaluate(true, () => {
+  return document.documentElement.requestFullscreen();
+});
+
+// Or pass per-call options
+const frameState = await frame.evaluate({
+  userGesture: true,
+  initScript: 'globalThis.__frameEvaluate = true;'
+}, () => {
+  return globalThis.__frameEvaluate;
+});
 ```
 
 ### Error Handling
@@ -367,6 +396,9 @@ For detailed API documentation, see [API.md](docs/API.md).
 - `fromSessionId()` - Create session from session ID
 
 #### Key Types
+- `EvaluateOptions` - CDP evaluate options plus nested script-generation options
+- `GenerateScriptOptions` - Script wrapper options such as `initScript` and `timeout`
+- `WebFrameEvaluateOptions` - Options accepted by `WebFrameMain.evaluate`
 - `SessionWithId` - Session with guaranteed ID
 - `DetachedSession` - Detached session with limited functionality
 - `DetachedSessionWithId` - Detached session with guaranteed ID
@@ -404,13 +436,13 @@ await session.setup({
 });
 
 // Listen for new sessions
-session.on('session-attached', (newSession, url) => {
-  console.log('New target attached:', newSession.target.type, url);
+session.on('session-attached', (newSession) => {
+  console.log('New target attached:', newSession.target.type);
 });
 
 // Listen for service worker events
-session.on('service-worker-running-status-changed', (event, session) => {
-  console.log('Service worker status changed:', event.runningStatus);
+session.on('service-worker-restarted', (session) => {
+  console.log('Service worker restarted:', session.id);
 });
 ```
 
@@ -432,8 +464,8 @@ session.on('execution-context-created', (context) => {
   console.log('New context created:', context.id);
 });
 
-session.on('execution-context-destroyed', (contextId) => {
-  console.log('Context destroyed:', contextId);
+session.on('execution-context-destroyed', (event) => {
+  console.log('Context destroyed:', event.executionContextId);
 });
 
 session.on('execution-contexts-cleared', () => {
@@ -454,7 +486,7 @@ await session.setup({
 
 // Navigate to page
 await session.send('Page.navigate', { url: 'https://example.com' });
-await session.send('Page.loadEventFired');
+await new Promise(resolve => session.once('Page.loadEventFired', resolve));
 
 // Extract data with complex types
 const data = await session.evaluate(() => {
@@ -525,8 +557,8 @@ session.on('Performance.metrics', (params) => {
 });
 
 // Monitor service worker performance
-session.on('service-worker-running-status-changed', (event, session) => {
-  console.log('Service worker status:', event.runningStatus);
+session.on('service-worker-restarted', (session) => {
+  console.log('Service worker restarted:', session.id);
 });
 
 // Get memory usage with complex data
@@ -557,15 +589,15 @@ if (!webContents.debugger.isAttached()) {
 **2. Function Execution Timeout**
 ```ts
 // Increase timeout for long-running functions
-const result = await session.evaluate(() => {
+const result = await session.evaluate({ timeout: 30000 }, () => {
   // Long-running operation
-}, { timeout: 30000 }); // 30 seconds
+}); // 30 seconds
 ```
 
 **3. Serialization Issues**
 ```ts
-// Use SuperJSON for complex data types
-await session.enableSuperJSON();
+// Preload SuperJSON for complex data types
+await session.enableSuperJSONPreload();
 const result = await session.evaluate((data) => {
   return new Map(Object.entries(data));
 }, { key: 'value' });
@@ -573,9 +605,9 @@ const result = await session.evaluate((data) => {
 
 ## Requirements
 
-- Node.js 14+
-- Electron 13+
-- TypeScript 4.5+ (for TypeScript projects)
+- Node.js 22.12+ for the current Electron 42 development/test setup
+- Electron 42+
+- TypeScript 5.4+ for TypeScript projects
 
 ## License
 

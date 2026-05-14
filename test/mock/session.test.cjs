@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 
-const { ExecutionContext, Session, attach, isAttached } = require('../..');
+const { ExecutionContext, Session, attach, isAttached, patchWebFrameMain } = require('../..');
 
 class MockDebugger extends EventEmitter {
   constructor() {
@@ -122,6 +122,203 @@ test('ExecutionContext.evaluate sends Runtime.evaluate and parses SuperJSON resu
   assert.equal(command.params.awaitPromise, true);
   assert.equal(command.params.returnByValue, false);
   assert.match(command.params.expression, /const fn = \(a, b\) =>/);
+});
+
+test('ExecutionContext.evaluate keeps script options out of Runtime.evaluate params', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  webContents.debugger.runtimeEvaluateResult = {
+    result: {
+      value: session.superJSON.stringify('ready'),
+    },
+  };
+
+  const context = new ExecutionContext(session, 9);
+  const actual = await context.evaluate(
+    {
+      timeout: 1234,
+      script: {
+        initScript: 'globalThis.__contextEvaluateScript = true;',
+      },
+    },
+    () => 'ready',
+  );
+
+  assert.equal(actual, 'ready');
+
+  const command = webContents.debugger.commands.findLast(({ method }) => method === 'Runtime.evaluate');
+  assert.equal(command.params.contextId, 9);
+  assert.equal(command.params.timeout, 1234);
+  assert.equal('script' in command.params, false);
+  assert.match(command.params.expression, /__contextEvaluateScript/);
+});
+
+test('WebFrameMain.evaluate accepts options object with userGesture and script options', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  const calls = [];
+  const frame = {
+    executeJavaScript: async (...callArgs) => {
+      calls.push(callArgs);
+      return session.superJSON.stringify({ ok: true });
+    },
+  };
+
+  patchWebFrameMain(session, frame);
+
+  const actual = await frame.evaluate(
+    {
+      userGesture: true,
+      initScript: 'globalThis.__frameEvaluateOption = true;',
+    },
+    () => ({ ok: globalThis.__frameEvaluateOption === true }),
+  );
+
+  assert.deepEqual(actual, { ok: true });
+  assert.equal(calls[0].length, 2);
+  assert.equal(calls[0][1], true);
+  assert.match(calls[0][0], /__frameEvaluateOption/);
+});
+
+test('WebFrameMain.evaluate preserves boolean userGesture overload', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  const calls = [];
+  const frame = {
+    executeJavaScript: async (...callArgs) => {
+      calls.push(callArgs);
+      return session.superJSON.stringify('ok');
+    },
+  };
+
+  patchWebFrameMain(session, frame);
+
+  const actual = await frame.evaluate(false, () => 'ok');
+
+  assert.equal(actual, 'ok');
+  assert.equal(calls[0].length, 2);
+  assert.equal(calls[0][1], false);
+});
+
+test('WebFrameMain.evaluate omits userGesture when it is not provided', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  const calls = [];
+  const frame = {
+    executeJavaScript: async (...callArgs) => {
+      calls.push(callArgs);
+      return session.superJSON.stringify('ok');
+    },
+  };
+
+  patchWebFrameMain(session, frame);
+
+  const actual = await frame.evaluate(() => 'ok');
+
+  assert.equal(actual, 'ok');
+  assert.equal(calls[0].length, 1);
+});
+
+test('WebFrameMain.evaluate applies patch defaults and lets per-call script override them', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  const calls = [];
+  const frame = {
+    executeJavaScript: async (...callArgs) => {
+      calls.push(callArgs);
+      return session.superJSON.stringify('ok');
+    },
+  };
+
+  patchWebFrameMain(session, frame, {
+    initScript: 'globalThis.__defaultFrameScript = true;',
+  });
+
+  await frame.evaluate(() => 'ok');
+  await frame.evaluate(
+    {
+      script: {
+        initScript: 'globalThis.__overrideFrameScript = true;',
+      },
+    },
+    () => 'ok',
+  );
+
+  assert.match(calls[0][0], /__defaultFrameScript/);
+  assert.doesNotMatch(calls[0][0], /__overrideFrameScript/);
+  assert.match(calls[1][0], /__overrideFrameScript/);
+  assert.doesNotMatch(calls[1][0], /__defaultFrameScript/);
+});
+
+test('patchWebFrameMain respects overwrite option', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  const existingEvaluate = async () => 'existing';
+  const frame = {
+    evaluate: existingEvaluate,
+    executeJavaScript: async () => session.superJSON.stringify('patched'),
+  };
+
+  patchWebFrameMain(session, frame);
+  assert.equal(frame.evaluate, existingEvaluate);
+  assert.equal(await frame.evaluate(), 'existing');
+
+  patchWebFrameMain(session, frame, { overwrite: true });
+  assert.notEqual(frame.evaluate, existingEvaluate);
+  assert.equal(await frame.evaluate(() => 'patched'), 'patched');
+});
+
+test('MainSession.setup applies frame evaluate script defaults to existing and created frames', async () => {
+  const webContents = createMockWebContents();
+  const frameCalls = [];
+  let session;
+  webContents.mainFrame.executeJavaScript = async (...callArgs) => {
+    frameCalls.push(callArgs);
+    return callArgs[0].includes('const fn =') ? session.superJSON.stringify('main') : undefined;
+  };
+
+  session = attach(webContents);
+  await session.setup({
+    initScript: 'globalThis.__setupFrameScript = true;',
+    timeout: 4321,
+  });
+
+  assert.equal(await webContents.mainFrame.evaluate(() => 'main'), 'main');
+
+  const mainEvaluateCall = frameCalls.find(([source]) => source.includes('const fn ='));
+  assert.match(mainEvaluateCall[0], /__setupFrameScript/);
+
+  const childCalls = [];
+  const childFrame = {
+    processId: 3,
+    routingId: 4,
+    framesInSubtree: [],
+    isDestroyed: () => false,
+    executeJavaScript: async (...callArgs) => {
+      childCalls.push(callArgs);
+      return session.superJSON.stringify('child');
+    },
+  };
+
+  webContents.emit('frame-created', {}, { frame: childFrame });
+
+  assert.equal(await childFrame.evaluate(() => 'child'), 'child');
+  assert.match(childCalls[0][0], /__setupFrameScript/);
+});
+
+test('Session.exposeFunction applies script options to browser bridge injection', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+
+  await session.exposeFunction('nativeFromMock', () => undefined, {
+    script: {
+      initScript: 'globalThis.__exposeFunctionScript = true;',
+    },
+  });
+
+  const command = webContents.debugger.commands.findLast(({ method }) => method === 'Page.addScriptToEvaluateOnNewDocument');
+
+  assert.match(command.params.source, /__exposeFunctionScript/);
 });
 
 test('ExecutionContext.evaluate converts CDP exception details into thrown objects', async () => {

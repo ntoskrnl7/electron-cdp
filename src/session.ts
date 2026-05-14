@@ -4,8 +4,8 @@
 import EventEmitter from 'events'; // NOSONAR: Intentionally using `events` for compatibility with both browser and Node.js runtimes.
 import { Protocol } from 'devtools-protocol/types/protocol.d';
 import { ProtocolMapping } from 'devtools-protocol/types/protocol-mapping.d';
-import Electron, { WebContents, WebFrameMain, webFrameMain } from 'electron';
-import { EvaluateOptions, SuperJSON, ExecutionContext, generateScriptString } from '.';
+import Electron, { WebContents, webFrameMain } from 'electron';
+import { EvaluateOptions, SuperJSON, ExecutionContext, type GenerateScriptOptions, generateScriptString, patchWebFrameMain } from '.';
 
 import superJSONBrowserScript from './superJSON.browser.js?raw';
 
@@ -171,6 +171,12 @@ export interface ExposeFunctionOptions {
      * Default: `true`
      */
     overwrite?: boolean;
+
+    /**
+     * Script generation options applied when this exposed function installs or
+     * updates its browser-side bridge.
+     */
+    script?: Omit<GenerateScriptOptions, 'session'>;
 }
 
 const kAwaitCompletionSymbol = Symbol('awaitCompletion');
@@ -309,12 +315,12 @@ export interface SessionOptions {
 
     /**
      * Whether to automatically attach to related targets.
-     * 
+     *
      * default: `undefined`
-     * 
+     *
      * - `false`, `undefined` : No auto attachment to related targets.
      * - `true` : Auto attachment to related targets.
-     * - `TargetType[]` : Auto attachment to related targets of the specified types.
+     * - `Target['type'][]` : Auto attachment to related targets of the specified types.
      */
     autoAttachToRelatedTargets?: boolean | (Target['type'][]);
 }
@@ -325,9 +331,9 @@ export interface SessionOptions {
 export interface SetAutoAttachOptions {
     /**
      * Target types to attach to.
-     * 
+     *
      * default: `undefined`
-     * 
+     *
      * - `undefined` : Auto attachment to all related targets.
      * - `Target['type'][]` : Auto attachment to related targets of the specified types.
      */
@@ -335,9 +341,9 @@ export interface SetAutoAttachOptions {
 
     /**
      * Whether to attach to related targets recursively.
-     * 
+     *
      * default: `undefined`
-     * 
+     *
      * - `undefined` : Auto attachment to related targets recursively.
      * - `true` : Auto attachment to related targets recursively.
      * - `false` : Auto attachment to related targets not recursively.
@@ -498,12 +504,12 @@ export class Session {
     evaluate<A extends unknown[], R>(options: EvaluateOptions, fn: (...args: A) => R, ...args: A): Promise<R>;
 
     /**
-     * Exposes a function to the browser's global context under the specified name.
+     * Implementation for the `evaluate` overloads.
      *
-     * @param name - The name under which the function will be exposed.
-     * @param fn - The function to expose.
-     * @param options - Optional settings for exposing the function.
-     * @returns A promise that resolves when the function is successfully exposed.
+     * @param fnOrOptions - Function to evaluate, or options followed by the function.
+     * @param fnOrArg0 - Function to evaluate when options are provided, or the first function argument.
+     * @param args - Remaining arguments passed to the evaluated function.
+     * @returns A promise that resolves with the evaluated function result.
      */
     async evaluate<F extends (...args: ARGS) => R, ARG_0, ARGS_OTHER extends unknown[], ARGS extends [ARG_0, ...ARGS_OTHER], R>(
         fnOrOptions: F | EvaluateOptions,
@@ -596,7 +602,7 @@ export class Session {
     /**
      * Enables tracking of execution contexts within the session.
      *
-     * When enabled, the session will listen for execution context lifecycle events (`execution-context-created`, `execution-context-destroyed`, `execution-contexts-cleared)
+     * When enabled, the session will listen for execution context lifecycle events (`execution-context-created`, `execution-context-destroyed`, `execution-contexts-cleared`).
      * and maintain a map of active execution contexts.
      *
      * This method sends the `Runtime.enable` command and starts tracking for all subsequently created execution contexts.
@@ -1007,6 +1013,9 @@ export class Session {
 
         const source = `${superJSONBrowserScript}; (${convertToFunction(this.#customizeSuperJSON.toString())})(SuperJSON.default); (globalThis.$cdp ??= { consoleDebug: console.debug }).superJSON = SuperJSON.default;`;
         try {
+            if ((await this.#domainsPr).some(domain => domain.name === 'Page')) {
+                await this.send('Page.enable');
+            }
             await this.send('Page.addScriptToEvaluateOnNewDocument', { runImmediately: true, source });
         } catch (error) {
             console.error('[Session.enableSuperJSON] Failed to inject code :', error);
@@ -1157,43 +1166,15 @@ export class Session {
         }
     }
 
-    #patchWebFrameMain(frame: WebFrameMain) {
-        if (frame.evaluate !== undefined) {
-            return frame;
-        }
-        frame.evaluate ??= async <A0, A extends unknown[], R>(userGestureOrFn: boolean | ((...args: [A0, ...A]) => R), fnOrArg0: A0 | ((...args: [A0, ...A]) => R), ...args: A): Promise<R> => {
-            try {
-                if (typeof userGestureOrFn === 'boolean') {
-                    return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, fnOrArg0 as (...args: A) => R, ...args), userGestureOrFn)) as string);
-                } else {
-                    return this.superJSON.parse(await (frame.executeJavaScript(generateScriptString({ session: this }, userGestureOrFn, fnOrArg0 as A0, ...args))) as string);
-                }
-            } catch (error) {
-                if (typeof error === 'string') {
-                    let result;
-                    try {
-                        result = this.superJSON.parse(error);
-                    } catch {
-                    }
-                    if (result) {
-                        throw result;
-                    }
-                }
-                throw error;
-            }
-        };
-        return frame;
-    }
-
     /**
      * Exposes a function to the browser's global context.
      *
      * @param name - The name under which the function will be exposed.
      * @param fn - The function to expose.
      * @param options - Options for exposing the function.
-     * @returns True if the function is exposed successfully, false otherwise.
+     * @returns `true` if the function is exposed successfully, `false` when it is already exposed.
      */
-    async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions) {
+    async exposeFunction<T, A extends unknown[]>(name: string, fn: (...args: A) => Promise<T> | T, options?: ExposeFunctionOptions): Promise<boolean> {
         const id = `expose-function-${crypto.randomUUID()}` as const;
 
         if (options?.overwrite) {
@@ -1370,7 +1351,7 @@ export class Session {
             const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
             try {
                 if (options?.retry) {
-                    await context.evaluate({ timeout }, (seq) => {
+                    await context.evaluate({ timeout, script: options?.script }, (seq) => {
                         if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                             globalThis.$cdp.callback.returnValues[seq].init = true;
                         }
@@ -1379,7 +1360,7 @@ export class Session {
                 const ret = await fn(...payload.args);
 
                 if (withReturnValue) {
-                    await context.evaluate({ timeout }, (seq, ret) => {
+                    await context.evaluate({ timeout, script: options?.script }, (seq, ret) => {
                         if (globalThis.$cdp?.callback?.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                             globalThis.$cdp.callback.returnValues[seq].value = ret;
                         }
@@ -1388,7 +1369,7 @@ export class Session {
             } catch (error) {
                 if (isUnexceptedError(error)) {
                     if (withReturnValue) {
-                        await context.evaluate({ timeout }, (seq, error) => {
+                        await context.evaluate({ timeout, script: options?.script }, (seq, error) => {
                             if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
                                 globalThis.$cdp.callback.errors[seq].value = error;
                             }
@@ -1400,13 +1381,34 @@ export class Session {
 
         const mode = options?.mode ?? 'Electron';
         const withReturnValue = options?.withReturnValue;
-        const timeout = () => new Promise<void>((resolve, reject) => {
+        const withReturnTimeout = async <T>(promise: Promise<T>) => {
             const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
-            if (timeout) {
-                setTimeout(reject, timeout);
+            if (timeout === undefined) {
+                return promise;
             }
-            resolve();
-        });
+
+            let timeoutId: ReturnType<typeof setTimeout> | undefined;
+            try {
+                return await Promise.race([
+                    promise,
+                    new Promise<never>((_, reject) => {
+                        timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), timeout);
+                    })
+                ]);
+            } finally {
+                if (timeoutId !== undefined) {
+                    clearTimeout(timeoutId);
+                }
+            }
+        };
+
+        const evaluateWithScript = <T, A extends unknown[]>(target: this | Electron.WebFrameMain, fn: (...args: A) => T, ...args: A) => {
+            const evaluateOptions = { script: options?.script };
+            if (target instanceof Session) {
+                return target.evaluate(evaluateOptions, fn, ...args);
+            }
+            return target.evaluate(evaluateOptions, fn, ...args);
+        };
 
         const bindingCalled = (event: Protocol.Runtime.BindingCalledEvent) => {
             try {
@@ -1425,30 +1427,30 @@ export class Session {
 
         const init = async (target: this | Electron.WebFrameMain, sequence: string) => {
             if (options?.retry) {
-                await Promise.race([target.evaluate(seq => {
+                await withReturnTimeout(evaluateWithScript(target, (seq: string) => {
                     if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                         globalThis.$cdp.callback.returnValues[seq].init = true;
                     }
-                }, sequence), timeout()]);
+                }, sequence));
             }
         };
 
         const resolve = async (target: this | Electron.WebFrameMain, sequence: string, result: unknown) => {
             if (withReturnValue) {
-                await Promise.race([target.evaluate((seq, ret) => {
+                await withReturnTimeout(evaluateWithScript(target, (seq: string, ret: unknown) => {
                     if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                         globalThis.$cdp.callback.returnValues[seq].value = ret;
                     }
-                }, sequence, result), timeout()]);
+                }, sequence, result));
             }
         };
         const reject = async (target: this | Electron.WebFrameMain, sequence: string, error: unknown) => {
             if (withReturnValue) {
-                await Promise.race([target.evaluate((seq, error) => {
+                await withReturnTimeout(evaluateWithScript(target, (seq: string, error: unknown) => {
                     if (globalThis.$cdp?.callback?.errors && seq in globalThis.$cdp.callback.errors) {
                         globalThis.$cdp.callback.errors[seq].value = error;
                     }
-                }, sequence, error), timeout()]);
+                }, sequence, error));
             }
         };
 
@@ -1461,7 +1463,7 @@ export class Session {
 
                 const { type, sessionId, frameId, payload: payloadString } = JSON.parse(details.message.substring('cdp-utils-'.length)) as InvokeMessage;
 
-                const frame = this.#patchWebFrameMain(getWebFrameFromFrameId(frameId) ?? details.frame);
+                const frame = patchWebFrameMain(this, getWebFrameFromFrameId(frameId) ?? details.frame);
 
                 if (sessionId !== this.id) {
                     return {};
@@ -1564,7 +1566,7 @@ export class Session {
                 }
                 default:
                     //
-                    // Unsupported Electron target type encountered. 
+                    // Unsupported Electron target type encountered.
                     // Only "service_worker", "page", "iframe", and "worker" are currently handled.
                     //
                     throw new Error(`Electron mode does not support target type: ${targetInfo.type}`);
@@ -1584,17 +1586,18 @@ export class Session {
         let entry;
         try {
             if ((!targetInfo.type.endsWith('worker') && (await this.#domainsPr).some(d => d.name === 'Page'))) {
+                await this.send('Page.enable');
                 const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
                     runImmediately: true,
-                    source: generateScriptString({ session: this }, attachFunction, id, name, options, this.id)
+                    source: generateScriptString({ ...options?.script, session: this }, attachFunction, id, name, options, this.id)
                 })).identifier;
                 entry = {
                     scriptId,
-                    attach: () => this.evaluate(attachFunction, id, name, options, this.id),
+                    attach: () => this.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id),
                     removeHandler
                 };
                 this.#exposeFunctions.set(name, entry);
-                return entry;
+                return true;
             }
         } catch (error) {
             logUnexceptedError(error, { type: 'error', message: `[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :` });
@@ -1611,7 +1614,7 @@ export class Session {
          *   Inject into existing frames immediately, and then hook 'did-frame-navigate'
          *   to avoid touching frame contexts before Electron preload injection.
          */
-        await this.evaluate(attachFunction, id, name, options, this.id)
+        await this.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id)
             .catch(error => {
                 if (isUnexceptedError(error)) {
                     console.error(`[CDP.exposeFunction] Failed to inject code(attachFunction:${name}) :`, error);
@@ -1622,7 +1625,7 @@ export class Session {
 
         if (mode === 'CDP') {
             for (const ctx of this.#executionContexts.values()) {
-                promises.push(ctx.evaluate(attachFunction, id, name, options, this.id).catch(error => {
+                promises.push(ctx.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id).catch(error => {
                     if (isUnexceptedError(error)) {
                         console.error(error);
                     }
@@ -1631,7 +1634,7 @@ export class Session {
 
             const executionContextCreated = async (context: ExecutionContext) => {
                 try {
-                    await context.evaluate(attachFunction, id, name, options, this.id);
+                    await context.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id);
                 } catch (error) {
                     if (isUnexceptedError(error)) {
                         console.error(error);
@@ -1643,13 +1646,13 @@ export class Session {
             this.#emitter.prependListener('execution-context-created', executionContextCreated);
             entry = {
                 executionContextCreated,
-                attach: () => this.evaluate(attachFunction, id, name, options, this.id),
+                attach: () => this.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id),
                 removeHandler
             };
         } else if (this.id === undefined) {
             for (const frame of this.webContents.mainFrame.framesInSubtree) {
-                this.#patchWebFrameMain(frame);
-                promises.push(frame.evaluate(attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`));
+                patchWebFrameMain(this, frame);
+                promises.push(frame.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`));
             }
 
             const didFrameNavigate = async (
@@ -1666,8 +1669,8 @@ export class Session {
                     if (!frame) {
                         return;
                     }
-                    this.#patchWebFrameMain(frame);
-                    frame.evaluate(attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`);
+                    patchWebFrameMain(this, frame);
+                    frame.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id, `${frame.processId}-${frame.routingId}`);
                 } catch (error) {
                     console.error(error);
                 }
@@ -1676,7 +1679,7 @@ export class Session {
             this.webContents.on('did-frame-navigate', didFrameNavigate);
             entry = {
                 didFrameNavigate,
-                attach: () => this.webContents.mainFrame.evaluate(attachFunction, id, name, options, this.id),
+                attach: () => this.webContents.mainFrame.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id),
                 removeHandler
             };
         }
@@ -1684,7 +1687,7 @@ export class Session {
 
 
         entry ??= {
-            attach: () => this.evaluate(attachFunction, id, name, options, this.id),
+            attach: () => this.evaluate({ script: options?.script }, attachFunction, id, name, options, this.id),
             removeHandler
         };
 
@@ -1739,7 +1742,7 @@ export class Session {
         const promises = [];
         if (this.target.type === 'page' || this.target.type === 'iframe') {
             promises.push(...this.webContents.mainFrame.framesInSubtree.map(frame => {
-                this.#patchWebFrameMain(frame);
+                patchWebFrameMain(this, frame);
                 // @ts-expect-error : globalThis[name]
                 return frame.evaluate(name => delete globalThis[name], name);
             }));
