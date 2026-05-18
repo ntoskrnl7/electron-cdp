@@ -76,9 +76,18 @@ export class MainSession extends CDPSession {
     async setup(options?: { preloadSuperJSON?: boolean | ((superJSON: SuperJSON) => void) } & Omit<GenerateScriptOptions, 'session'> & SessionOptions) {
 
         const promises = [];
-        promises.push(this.applyOptions(options));
+        const { preloadSuperJSON, initScript, timeout, script, ...sessionOptions } = options ?? {};
+        const setupScriptOptions = {
+            ...(initScript === undefined ? {} : { initScript }),
+            ...(timeout === undefined ? {} : { timeout }),
+            ...script
+        };
+        const hasSetupScriptOptions = initScript !== undefined || timeout !== undefined || script !== undefined;
+        promises.push(this.applyOptions({
+            ...sessionOptions,
+            ...(hasSetupScriptOptions ? { script: setupScriptOptions } : {})
+        }));
 
-        const preloadSuperJSON = options?.preloadSuperJSON;
         if (preloadSuperJSON) {
             promises.push(this.enableSuperJSONPreload(typeof preloadSuperJSON === 'boolean' ? undefined : preloadSuperJSON));
         }
@@ -97,8 +106,7 @@ export class MainSession extends CDPSession {
         };
 
         const frameEvaluateOptions: WebFramePatchOptions = {
-            initScript: options?.initScript,
-            timeout: options?.timeout
+            ...setupScriptOptions
         };
 
         const patchFrame = (frame: WebFrameMain | undefined | null) => {

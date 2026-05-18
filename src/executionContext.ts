@@ -137,7 +137,7 @@ export class ExecutionContext {
     async #evaluate<T, A extends unknown[]>(options: EvaluateOptions | undefined, fn: (...args: A) => T, ...args: A): Promise<T> {
         const { script, ...runtimeOptions } = options ?? {};
         const res = await this.session.send('Runtime.evaluate', {
-            expression: generateScriptString({ ...script, session: this.session }, fn, ...args),
+            expression: generateScriptString({ ...this.session.getScriptOptions(script), session: this.session }, fn, ...args),
             contextId: this.id,
             throwOnSideEffect: false,
             awaitPromise: true,
