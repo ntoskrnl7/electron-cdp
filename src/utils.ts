@@ -188,7 +188,7 @@ export function patchWebFrameMain(session: Session, frame: WebFrameMain, options
         try {
             const [firstArg, secondArg, ...args] = evaluateArgs;
             let userGesture: boolean | undefined;
-            let scriptOptions: Omit<GenerateScriptOptions, 'session'> | undefined = defaultScriptOptions;
+            let scriptOptions: Omit<GenerateScriptOptions, 'session'> | undefined = session.getScriptOptions(defaultScriptOptions);
             let targetFn: ((...args: unknown[]) => R) | undefined;
             let targetArgs: unknown[];
 
@@ -202,7 +202,7 @@ export function patchWebFrameMain(session: Session, frame: WebFrameMain, options
             } else if (firstArg && typeof firstArg === 'object') {
                 const { userGesture: evaluateUserGesture, script, ...inlineScriptOptions } = firstArg as WebFrameEvaluateOptions;
                 userGesture = evaluateUserGesture;
-                scriptOptions = { ...defaultScriptOptions, ...inlineScriptOptions, ...script };
+                scriptOptions = session.getScriptOptions({ ...defaultScriptOptions, ...inlineScriptOptions, ...script });
                 targetFn = secondArg as ((...args: unknown[]) => R) | undefined;
                 targetArgs = args;
             } else {

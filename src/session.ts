@@ -323,6 +323,13 @@ export interface SessionOptions {
      * - `Target['type'][]` : Auto attachment to related targets of the specified types.
      */
     autoAttachToRelatedTargets?: boolean | (Target['type'][]);
+
+    /**
+     * Default script generation options applied to Session.evaluate,
+     * ExecutionContext.evaluate, exposeFunction bridge injection, and patched
+     * WebFrameMain.evaluate calls.
+     */
+    script?: Omit<GenerateScriptOptions, 'session'>;
 }
 
 /**
@@ -374,6 +381,7 @@ export class Session {
     #isSuperJSONPreloaded = false;
     #superJSON: SuperJSON;
     #customizeSuperJSON: CustomizeSuperJSONFunction = () => { };
+    #scriptOptions: Omit<GenerateScriptOptions, 'session'> = {};
 
     readonly #executionContexts: Map<Protocol.Runtime.ExecutionContextId, ExecutionContext> = new Map();
 
@@ -526,6 +534,22 @@ export class Session {
     }
 
     /**
+     * Merges session-level script defaults with per-call script options.
+     *
+     * Per-call options intentionally win so callers can override setup defaults.
+     */
+    getScriptOptions(script?: Omit<GenerateScriptOptions, 'session'>) {
+        return { ...this.#scriptOptions, ...script };
+    }
+
+    /**
+     * Configures default script-generation options for this session.
+     */
+    setScriptOptions(script?: Omit<GenerateScriptOptions, 'session'>) {
+        this.#scriptOptions = { ...script };
+    }
+
+    /**
      * Attaches to a specific DevTools Protocol target and returns a Session
      * scoped to that target's dedicated CDP session.
      *
@@ -589,6 +613,9 @@ export class Session {
      */
     async applyOptions(options?: Omit<SessionOptions, 'protocolVersion'>) {
         const promises = [];
+        if (options?.script) {
+            this.#scriptOptions = this.getScriptOptions(options.script);
+        }
         if (options?.autoAttachToRelatedTargets) {
             promises.push(this.setAutoAttach({ recursive: options.autoAttachToRelatedTargets !== undefined, targetTypes: options.autoAttachToRelatedTargets === true ? undefined : options.autoAttachToRelatedTargets }));
         }
@@ -762,6 +789,7 @@ export class Session {
                 const session = await Session.fromSessionId(this.webContents, sessionId);
                 try {
                     session.#parent = this;
+                    session.#scriptOptions = { ...this.#scriptOptions };
 
                     attachedSessions.set(sessionId, session);
 
@@ -1589,7 +1617,7 @@ export class Session {
                 await this.send('Page.enable');
                 const scriptId = (await this.send('Page.addScriptToEvaluateOnNewDocument', {
                     runImmediately: true,
-                    source: generateScriptString({ ...options?.script, session: this }, attachFunction, id, name, options, this.id)
+                    source: generateScriptString({ ...this.getScriptOptions(options?.script), session: this }, attachFunction, id, name, options, this.id)
                 })).identifier;
                 entry = {
                     scriptId,

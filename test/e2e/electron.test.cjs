@@ -114,7 +114,7 @@ test('Electron integration covers session, frame, context, and exposed-function 
   });
 
   await t.test('WebFrameMain.evaluate contracts', () => {
-    assert.equal(result.frameEvaluate.defaultRuns, 2);
+    assert.equal(result.frameEvaluate.defaultRuns, 10);
     assert.equal(result.frameEvaluate.args, 42);
     assert.deepEqual(result.frameEvaluate.complexReturn, {
       dateIsDate: true,
@@ -124,13 +124,13 @@ test('Electron integration covers session, frame, context, and exposed-function 
     });
     assert.deepEqual(result.frameEvaluate.inlineScript, {
       value: 'inline',
-      setupRuns: 3,
+      setupRuns: 11,
     });
     assert.deepEqual(result.frameEvaluate.nestedScript, {
       value: 'nested',
-      setupRuns: 3,
+      setupRuns: 11,
     });
-    assert.equal(result.frameEvaluate.defaultRunsAfterOverrides, 4);
+    assert.equal(result.frameEvaluate.defaultRunsAfterOverrides, 12);
     assert.equal(result.frameEvaluate.booleanUserGestureFalse, 'boolean-false');
     assert.equal(result.frameEvaluate.optionsUserGestureTrue, 'gesture');
 
@@ -169,7 +169,7 @@ test('Electron integration covers session, frame, context, and exposed-function 
     assert.deepEqual(result.afterNavigation.frame, {
       title: 'electron-cdp-utils e2e navigated',
       ready: 'after-navigation',
-      setupRuns: 1,
+      setupRuns: 3,
     });
     assert.deepEqual(result.afterNavigation.exposedFunctions, {
       addType: 'function',

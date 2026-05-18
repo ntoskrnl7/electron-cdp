@@ -153,6 +153,28 @@ test('ExecutionContext.evaluate keeps script options out of Runtime.evaluate par
   assert.match(command.params.expression, /__contextEvaluateScript/);
 });
 
+test('Session.evaluate applies session-level script defaults', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  await session.applyOptions({
+    script: {
+      initScript: 'globalThis.__sessionDefaultScript = true;',
+    },
+  });
+  webContents.debugger.runtimeEvaluateResult = {
+    result: {
+      value: session.superJSON.stringify('ready'),
+    },
+  };
+
+  const actual = await session.evaluate(() => 'ready');
+
+  assert.equal(actual, 'ready');
+
+  const command = webContents.debugger.commands.findLast(({ method }) => method === 'Runtime.evaluate');
+  assert.match(command.params.expression, /__sessionDefaultScript/);
+});
+
 test('WebFrameMain.evaluate accepts options object with userGesture and script options', async () => {
   const webContents = createMockWebContents();
   const session = new Session(webContents);
@@ -217,6 +239,26 @@ test('WebFrameMain.evaluate omits userGesture when it is not provided', async ()
 
   assert.equal(actual, 'ok');
   assert.equal(calls[0].length, 1);
+});
+
+test('WebFrameMain.evaluate applies session-level script defaults', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  session.setScriptOptions({
+    initScript: 'globalThis.__frameSessionDefaultScript = true;',
+  });
+  const calls = [];
+  const frame = {
+    executeJavaScript: async (...callArgs) => {
+      calls.push(callArgs);
+      return session.superJSON.stringify('ok');
+    },
+  };
+
+  patchWebFrameMain(session, frame);
+
+  assert.equal(await frame.evaluate(() => 'ok'), 'ok');
+  assert.match(calls[0][0], /__frameSessionDefaultScript/);
 });
 
 test('WebFrameMain.evaluate applies patch defaults and lets per-call script override them', async () => {
@@ -319,6 +361,62 @@ test('Session.exposeFunction applies script options to browser bridge injection'
   const command = webContents.debugger.commands.findLast(({ method }) => method === 'Page.addScriptToEvaluateOnNewDocument');
 
   assert.match(command.params.source, /__exposeFunctionScript/);
+});
+
+test('Session.exposeFunction applies session-level script defaults', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  session.setScriptOptions({
+    initScript: 'globalThis.__exposeFunctionDefaultScript = true;',
+  });
+
+  await session.exposeFunction('nativeDefaultFromMock', () => undefined);
+
+  const command = webContents.debugger.commands.findLast(({ method }) => method === 'Page.addScriptToEvaluateOnNewDocument');
+
+  assert.match(command.params.source, /__exposeFunctionDefaultScript/);
+});
+
+test('auto-attached sessions inherit session-level script defaults', async () => {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  await session.applyOptions({
+    script: {
+      initScript: 'globalThis.__attachedSessionDefaultScript = true;',
+    },
+  });
+
+  let attachedSession;
+  session.on('session-attached', childSession => {
+    attachedSession = childSession;
+  });
+
+  await session.setAutoAttach();
+  webContents.debugger.emit('message', {}, 'Target.attachedToTarget', {
+    sessionId: 'child-session',
+    targetInfo: {
+      targetId: 'worker-target',
+      type: 'worker',
+      title: 'Mock worker',
+      url: 'https://example.test/worker.js',
+      attached: true,
+      canAccessOpener: false,
+    },
+  });
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  assert.ok(attachedSession);
+  webContents.debugger.runtimeEvaluateResult = {
+    result: {
+      value: attachedSession.superJSON.stringify('ok'),
+    },
+  };
+
+  assert.equal(await attachedSession.evaluate(() => 'ok'), 'ok');
+
+  const command = webContents.debugger.commands.findLast(({ method }) => method === 'Runtime.evaluate');
+  assert.equal(command.sessionId, 'child-session');
+  assert.match(command.params.expression, /__attachedSessionDefaultScript/);
 });
 
 test('ExecutionContext.evaluate converts CDP exception details into thrown objects', async () => {
