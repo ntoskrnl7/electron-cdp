@@ -369,6 +369,49 @@ async function main() {
     })),
   };
 
+  debug('verify exposed-function rejection cleanup');
+  results.exposeFunction.cleanup = {};
+  for (const mode of ['Electron', 'CDP']) {
+    const name = `nativeCleanup${mode}`;
+    await session.exposeFunction(name, outcome => {
+      if (outcome === 'reject') {
+        throw new TypeError('cleanup-test-failure');
+      }
+      if (outcome === 'timeout') {
+        return new Promise(() => {});
+      }
+      return 42;
+    }, {
+      mode,
+      retry: { delay: 20 },
+      withReturnValue: { timeout: 1000 },
+    });
+
+    results.exposeFunction.cleanup[mode] = await session.evaluate(async name => {
+      const unhandled = [];
+      const onUnhandled = event => {
+        unhandled.push({ name: event.reason?.name, message: event.reason?.message });
+      };
+      window.addEventListener('unhandledrejection', onUnhandled);
+      try {
+        const outcomes = {};
+        for (const outcome of ['resolve', 'reject', 'timeout']) {
+          try {
+            outcomes[outcome] = { value: await globalThis[name](outcome) };
+          } catch (error) {
+            outcomes[outcome] = { error: { name: error.name, message: error.message } };
+          }
+        }
+        // Give the browser time to report rejections from discarded cleanup Promises.
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return { outcomes, unhandled };
+      } finally {
+        window.removeEventListener('unhandledrejection', onUnhandled);
+      }
+    }, name);
+    await session.removeExposedFunction(name);
+  }
+
   debug('detach and close');
   await session.detach();
   results.detach = {

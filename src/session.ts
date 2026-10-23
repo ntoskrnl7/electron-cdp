@@ -1318,7 +1318,9 @@ export class Session {
                                 reject(error);
                             }
                         }, retry.delay ?? 1);
-                        promise.finally(() => clearInterval(retryIntervalId));
+                        // A discarded finally() Promise would reject even when the caller catches promise.
+                        const clearRetryInterval = () => clearInterval(retryIntervalId);
+                        void promise.then(clearRetryInterval, clearRetryInterval);
                     }
 
                     if (!options?.withReturnValue) {
@@ -1341,7 +1343,7 @@ export class Session {
                             reject(error as Error);
                         }
                     }, withReturnValue.delay ?? 1);
-                    promise.finally(() => {
+                    const cleanupResult = () => {
                         clearInterval(resultIntervalId);
                         if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues) {
                             delete globalThis.$cdp.callback.returnValues[sequence];
@@ -1349,10 +1351,12 @@ export class Session {
                         if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors) {
                             delete globalThis.$cdp.callback.errors[sequence];
                         }
-                    });
+                    };
+                    void promise.then(cleanupResult, cleanupResult);
                     if (withReturnValue.timeout !== undefined) {
                         const timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), withReturnValue.timeout);
-                        promise.finally(() => clearTimeout(timeoutId));
+                        const clearReturnTimeout = () => clearTimeout(timeoutId);
+                        void promise.then(clearReturnTimeout, clearReturnTimeout);
                     }
 
                     return promise;
