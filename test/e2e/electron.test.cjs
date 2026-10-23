@@ -165,6 +165,21 @@ test('Electron integration covers session, frame, context, and exposed-function 
     assert.equal(result.exposeFunction.throwScriptRuns, 2);
   });
 
+  for (const mode of ['Electron', 'CDP']) {
+    await t.test(`exposeFunction ${mode} cleanup preserves results without unhandled rejections`, () => {
+      assert.deepEqual(result.exposeFunction.cleanup[mode], {
+        outcomes: {
+          resolve: { value: 42 },
+          reject: { error: { name: 'TypeError', message: 'cleanup-test-failure' } },
+          timeout: {
+            error: { name: 'Error', message: 'Operation did not complete before the timeout.' },
+          },
+        },
+        unhandled: [],
+      });
+    });
+  }
+
   await t.test('navigation and detach contracts', () => {
     assert.deepEqual(result.afterNavigation.frame, {
       title: 'electron-cdp-utils e2e navigated',
