@@ -105,9 +105,7 @@ export interface WithReturnValueOptions {
     timeout?: number;
 
     /**
-     * The delay before starting to wait for the function result.
-     * This value represents the initial wait time before the function result is checked.
-     * Default: 1
+     * @deprecated Results are delivered directly without polling. This option is ignored.
      */
     delay?: number;
 }
@@ -1280,83 +1278,97 @@ export class Session {
             if (overwrite || (lastName && !global[lastName])) {
                 global[lastName] = (...args: unknown[]) => {
                     const sequence = `${globalThis.$cdp.callback.sequence++}-${Math.random()}`;
-                    globalThis.$cdp.callback.returnValues[sequence] = { name, args };
-                    globalThis.$cdp.callback.errors[sequence] = { name, args };
+                    const startedAt = Date.now();
+                    const { promise, resolve, reject } = Promise.withResolvers();
+                    let acknowledged = false;
+                    let settled = false;
+                    let retryIntervalId: ReturnType<typeof setInterval> | undefined;
+                    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+                    const clearTimers = () => {
+                        clearInterval(retryIntervalId);
+                        clearTimeout(timeoutId);
+                    };
+                    const cleanup = () => {
+                        clearTimers();
+                        delete globalThis.$cdp.callback.returnValues[sequence];
+                        delete globalThis.$cdp.callback.errors[sequence];
+                    };
+                    const settle = (failed: boolean, value: unknown) => {
+                        if (settled) return;
+                        settled = true;
+                        cleanup();
+                        if (options?.withReturnValue) {
+                            if (failed) reject(value);
+                            else resolve(value);
+                        }
+                    };
+
+                    // Register before invoking: a response may arrive synchronously.
+                    // Setters run in the response evaluation, even when HTML sandboxing blocks timers.
+                    globalThis.$cdp.callback.returnValues[sequence] = {
+                        name, args,
+                        get init() { return acknowledged ? true : undefined; },
+                        set init(value) {
+                            if (!value || settled) return;
+                            acknowledged = true;
+                            // The main process now owns the result timeout.
+                            clearTimers();
+                            if (!options?.withReturnValue) settle(false, undefined);
+                        },
+                        set value(value: unknown) { settle(false, value); },
+                    };
+                    globalThis.$cdp.callback.errors[sequence] = {
+                        name, args,
+                        set value(value: unknown) { settle(true, value); },
+                    };
 
                     const invoke = () => {
-                        if ((global[lastName] as CallableFunction)['$id'] !== id) {
-                            console.debug('id changed', (global[lastName] as CallableFunction)['$id'], id);
+                        if ((global[lastName] as CallableFunction | undefined)?.['$id'] !== id) {
                             throw new Error(`'${name}' has been replaced.`);
                         }
                         if (mode === 'Electron' && globalThis.$cdp.callback.invoke) {
-                            globalThis.$cdp.callback.invoke(id, globalThis.$cdp.superJSON.stringify({ sequence, name, args }), sessionId, frameId);
+                            globalThis.$cdp.callback.invoke(id, globalThis.$cdp.superJSON.stringify({ sequence, name, args, startedAt }), sessionId, frameId);
                         } else if (mode === 'CDP' && globalThis['$cdp.callback.invoke']) {
-                            globalThis['$cdp.callback.invoke'](globalThis.$cdp.superJSON.stringify({ sequence, name, args }));
+                            globalThis['$cdp.callback.invoke'](globalThis.$cdp.superJSON.stringify({ sequence, name, args, startedAt }));
                         } else {
                             throw new Error('CDP callback invocation failed: handler not found.');
                         }
                     }
 
-                    invoke();
+                    try {
+                        invoke();
+                    } catch (error) {
+                        cleanup();
+                        throw error;
+                    }
 
-                    const { promise, resolve, reject } = Promise.withResolvers();
-
-                    if (options?.retry) {
-                        const retry = options?.retry === true ? { delay: 1 } : options?.retry;
-                        const retryIntervalId = setInterval(() => {
-                            if (globalThis.$cdp.callback.returnValues?.[sequence].init) {
-                                return;
-                            }
-                            if ((retry.count !== undefined) && retry.count-- < 0) {
+                    if (options?.retry && !acknowledged && !settled) {
+                        const retry = options.retry === true ? { delay: 1 } : { ...options.retry };
+                        retryIntervalId = setInterval(() => {
+                            if ((retry.count !== undefined) && retry.count-- <= 0) {
+                                clearInterval(retryIntervalId);
                                 console.warn('Failed after maximum retry attempts.');
+                                if (!options?.withReturnValue) settle(false, undefined);
                                 return;
                             }
                             try {
                                 invoke();
                             } catch (error) {
-                                console.debug(error);
-                                reject(error);
+                                settle(true, error);
                             }
                         }, retry.delay ?? 1);
-                        // A discarded finally() Promise would reject even when the caller catches promise.
-                        const clearRetryInterval = () => clearInterval(retryIntervalId);
-                        void promise.then(clearRetryInterval, clearRetryInterval);
                     }
 
                     if (!options?.withReturnValue) {
-                        delete globalThis.$cdp.callback.returnValues[sequence];
-                        delete globalThis.$cdp.callback.errors[sequence];
+                        if (!options?.retry) cleanup();
                         return;
                     }
 
                     const withReturnValue = typeof options.withReturnValue === 'object' ? options.withReturnValue : {};
 
-                    const resultIntervalId = setInterval(() => {
-                        try {
-                            if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues && 'value' in globalThis.$cdp.callback.returnValues[sequence]) {
-                                resolve(globalThis.$cdp.callback.returnValues[sequence].value);
-                            }
-                            if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors && 'value' in globalThis.$cdp.callback.errors[sequence]) {
-                                reject(globalThis.$cdp.callback.errors[sequence].value as Error);
-                            }
-                        } catch (error) {
-                            reject(error as Error);
-                        }
-                    }, withReturnValue.delay ?? 1);
-                    const cleanupResult = () => {
-                        clearInterval(resultIntervalId);
-                        if (globalThis.$cdp.callback.returnValues && sequence in globalThis.$cdp.callback.returnValues) {
-                            delete globalThis.$cdp.callback.returnValues[sequence];
-                        }
-                        if (globalThis.$cdp.callback.errors && sequence in globalThis.$cdp.callback.errors) {
-                            delete globalThis.$cdp.callback.errors[sequence];
-                        }
-                    };
-                    void promise.then(cleanupResult, cleanupResult);
-                    if (withReturnValue.timeout !== undefined) {
-                        const timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), withReturnValue.timeout);
-                        const clearReturnTimeout = () => clearTimeout(timeoutId);
-                        void promise.then(clearReturnTimeout, clearReturnTimeout);
+                    if (withReturnValue.timeout !== undefined && !acknowledged && !settled) {
+                        // Until acknowledgement, retain the watchdog for transport failures.
+                        timeoutId = setTimeout(() => settle(true, new Error('Operation did not complete before the timeout.')), withReturnValue.timeout);
                     }
 
                     return promise;
@@ -1366,7 +1378,7 @@ export class Session {
             }
         };
 
-        type Payload = { options?: EvaluateOptions, sequence: string, name: string, args: A };
+        type Payload = { options?: EvaluateOptions, sequence: string, name: string, args: A, startedAt?: number };
 
         const processBindingCall = async (executionContextId: number, payload: Payload) => {
             if (!this.#executionContexts.has(executionContextId)) {
@@ -1382,14 +1394,14 @@ export class Session {
             const withReturnValue = options?.withReturnValue;
             const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
             try {
-                if (options?.retry) {
+                if (options?.retry || timeout !== undefined) {
                     await context.evaluate({ timeout, script: options?.script }, (seq) => {
                         if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                             globalThis.$cdp.callback.returnValues[seq].init = true;
                         }
                     }, payload.sequence);
                 }
-                const ret = await fn(...payload.args);
+                const ret = await callFunction(payload);
 
                 if (withReturnValue) {
                     await context.evaluate({ timeout, script: options?.script }, (seq, ret) => {
@@ -1413,7 +1425,7 @@ export class Session {
 
         const mode = options?.mode ?? 'Electron';
         const withReturnValue = options?.withReturnValue;
-        const withReturnTimeout = async <T>(promise: Promise<T>) => {
+        const withReturnTimeout = async <T>(promise: Promise<T>, startedAt?: number) => {
             const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
             if (timeout === undefined) {
                 return promise;
@@ -1424,7 +1436,7 @@ export class Session {
                 return await Promise.race([
                     promise,
                     new Promise<never>((_, reject) => {
-                        timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), timeout);
+                        timeoutId = setTimeout(() => reject(new Error('Operation did not complete before the timeout.')), Math.max(0, timeout - (startedAt === undefined ? 0 : Date.now() - startedAt)));
                     })
                 ]);
             } finally {
@@ -1432,6 +1444,16 @@ export class Session {
                     clearTimeout(timeoutId);
                 }
             }
+        };
+
+        const callFunction = (payload: Payload) => {
+            const timeout = typeof withReturnValue === 'object' ? withReturnValue.timeout : undefined;
+            const startedAt = typeof payload.startedAt === 'number' && Number.isFinite(payload.startedAt)
+                ? Math.min(Date.now(), payload.startedAt) : Date.now();
+            if (timeout !== undefined && Date.now() - startedAt >= timeout) {
+                throw new Error('Operation did not complete before the timeout.');
+            }
+            return withReturnTimeout(Promise.resolve().then(() => fn(...payload.args)), startedAt);
         };
 
         const evaluateWithScript = <T, A extends unknown[]>(target: this | Electron.WebFrameMain, fn: (...args: A) => T, ...args: A) => {
@@ -1447,7 +1469,7 @@ export class Session {
                 if (event.name === '$cdp.callback.invoke') {
                     const payload: Payload = this.superJSON.parse(event.payload);
                     if (payload.name === name) {
-                        processBindingCall(event.executionContextId, payload);
+                        void processBindingCall(event.executionContextId, payload).catch(logUnexceptedError);
                     }
                 }
             } catch (error) {
@@ -1458,7 +1480,7 @@ export class Session {
         };
 
         const init = async (target: this | Electron.WebFrameMain, sequence: string) => {
-            if (options?.retry) {
+            if (options?.retry || (typeof withReturnValue === 'object' && withReturnValue.timeout !== undefined)) {
                 await withReturnTimeout(evaluateWithScript(target, (seq: string) => {
                     if (globalThis.$cdp?.callback.returnValues && seq in globalThis.$cdp.callback.returnValues) {
                         globalThis.$cdp.callback.returnValues[seq].init = true;
@@ -1513,7 +1535,7 @@ export class Session {
 
             try {
                 await init(target, payload.sequence);
-                await resolve(target, payload.sequence, await fn(...payload.args));
+                await resolve(target, payload.sequence, await callFunction(payload));
             } catch (error) {
                 try {
                     await reject(target, payload.sequence, error);
@@ -1566,7 +1588,7 @@ export class Session {
                         }
                         try {
                             await init(this, payload.sequence);
-                            await resolve(this, payload.sequence, await fn(...payload.args));
+                            await resolve(this, payload.sequence, await callFunction(payload));
                         } catch (error) {
                             try {
                                 await reject(this, payload.sequence, error);

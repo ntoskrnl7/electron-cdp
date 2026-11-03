@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const { ExecutionContext, Session, attach, isAttached, patchWebFrameMain } = require('../..');
 
@@ -361,6 +362,92 @@ test('Session.exposeFunction applies script options to browser bridge injection'
   const command = webContents.debugger.commands.findLast(({ method }) => method === 'Page.addScriptToEvaluateOnNewDocument');
 
   assert.match(command.params.source, /__exposeFunctionScript/);
+});
+
+async function createCallbackBridge(options, onInvoke = () => {}) {
+  const webContents = createMockWebContents();
+  const session = new Session(webContents);
+  await session.exposeFunction('nativeCallback', () => undefined, { mode: 'CDP', ...options });
+  const source = webContents.debugger.commands.findLast(command => command.method === 'Page.addScriptToEvaluateOnNewDocument').params.source;
+  const intervals = new Map();
+  const timeouts = new Map();
+  let nextTimer = 0;
+  const requests = [];
+  const context = vm.createContext({
+    URL,
+    console: { debug() {}, warn() {} },
+    setInterval: fn => { intervals.set(++nextTimer, fn); return nextTimer; },
+    clearInterval: id => intervals.delete(id),
+    setTimeout: fn => { timeouts.set(++nextTimer, fn); return nextTimer; },
+    clearTimeout: id => timeouts.delete(id),
+    '$cdp.callback.invoke': payload => {
+      const request = session.superJSON.parse(payload);
+      requests.push(request);
+      onInvoke(context.$cdp.callback, request);
+    },
+  });
+  await vm.runInContext(source, context);
+  return { context, requests, intervals, timeouts };
+}
+
+test('exposed callbacks settle synchronous undefined responses without polling', async () => {
+  const { context, intervals, timeouts } = await createCallbackBridge({
+    withReturnValue: { delay: 60000, timeout: 1000 }, retry: true,
+  }, (callback, request) => { callback.returnValues[request.sequence].value = undefined; });
+  assert.equal(await context.nativeCallback(), undefined);
+  assert.equal(intervals.size, 0);
+  assert.equal(timeouts.size, 0);
+  assert.deepEqual(Object.keys(context.$cdp.callback.returnValues), []);
+  assert.deepEqual(Object.keys(context.$cdp.callback.errors), []);
+});
+
+test('acknowledgement stops retry and renderer timeout before an asynchronous result', async () => {
+  const bridge = await createCallbackBridge({ withReturnValue: { timeout: 1000 }, retry: { delay: 10 } });
+  const promise = bridge.context.nativeCallback();
+  const sequence = bridge.requests[0].sequence;
+  assert.equal(bridge.intervals.size, 1);
+  assert.equal(bridge.timeouts.size, 1);
+  bridge.context.$cdp.callback.returnValues[sequence].init = true;
+  assert.equal(bridge.intervals.size, 0);
+  assert.equal(bridge.timeouts.size, 0);
+  const error = new TypeError('response-error');
+  bridge.context.$cdp.callback.errors[sequence].value = error;
+  await assert.rejects(promise, error);
+  assert.deepEqual(Object.keys(bridge.context.$cdp.callback.returnValues), []);
+});
+
+test('retry budgets are independent per call and stop after the configured count', async () => {
+  const bridge = await createCallbackBridge({ retry: { count: 1, delay: 1 } });
+  for (let call = 0; call < 2; call++) {
+    assert.equal(bridge.context.nativeCallback(), undefined);
+    const tick = [...bridge.intervals.values()][0];
+    tick();
+    tick();
+    assert.equal(bridge.requests.length, (call + 1) * 2);
+    assert.equal(bridge.intervals.size, 0);
+    assert.deepEqual(Object.keys(bridge.context.$cdp.callback.returnValues), []);
+  }
+});
+
+test('fire-and-forget retry is cleaned up on acknowledgement', async () => {
+  const bridge = await createCallbackBridge({ retry: true, withReturnValue: false });
+  assert.equal(bridge.context.nativeCallback(), undefined);
+  bridge.context.$cdp.callback.returnValues[bridge.requests[0].sequence].init = true;
+  assert.equal(bridge.intervals.size, 0);
+  assert.deepEqual(Object.keys(bridge.context.$cdp.callback.returnValues), []);
+});
+
+test('transport errors and unacknowledged timeouts release callback state', async () => {
+  const failed = await createCallbackBridge({ withReturnValue: true }, () => { throw new Error('transport-failure'); });
+  assert.throws(() => failed.context.nativeCallback(), /transport-failure/);
+  assert.deepEqual(Object.keys(failed.context.$cdp.callback.returnValues), []);
+  const timed = await createCallbackBridge({ withReturnValue: { timeout: 10 }, retry: true });
+  const promise = timed.context.nativeCallback();
+  [...timed.timeouts.values()][0]();
+  await assert.rejects(promise, /Operation did not complete before the timeout/);
+  assert.equal(timed.intervals.size, 0);
+  assert.equal(timed.timeouts.size, 0);
+  assert.deepEqual(Object.keys(timed.context.$cdp.callback.errors), []);
 });
 
 test('Session.exposeFunction applies session-level script defaults', async () => {

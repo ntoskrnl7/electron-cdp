@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-11-03
+
+### Fixed
+- Deliver exposed-function results directly instead of polling with a renderer timer, including CDP calls in script-disabled sandbox frames.
+- Stop retry timers on acknowledgement and enforce acknowledged call timeouts in the main process.
+- Release fire-and-forget retry state and keep retry budgets independent between calls.
+- Handle late CDP response failures without creating an unhandled rejection after context destruction.
+
+### Changed
+- Deprecate `WithReturnValueOptions.delay`; results no longer require a polling delay.
+
 ## [0.3.2] - 2024-01-15
 
 ### Added

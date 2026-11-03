@@ -155,14 +155,14 @@ test('Electron integration covers session, frame, context, and exposed-function 
     });
     assert.deepEqual(result.exposeFunction.electronMode, {
       sum: 42,
-      scriptRuns: 2,
+      scriptRuns: 3,
     });
     assert.deepEqual(result.exposeFunction.cdpMode, {
       product: 42,
-      scriptRuns: 2,
+      scriptRuns: 3,
     });
     assertThrown(result.exposeFunction.thrown);
-    assert.equal(result.exposeFunction.throwScriptRuns, 2);
+    assert.equal(result.exposeFunction.throwScriptRuns, 3);
   });
 
   for (const mode of ['Electron', 'CDP']) {
@@ -191,8 +191,8 @@ test('Electron integration covers session, frame, context, and exposed-function 
       multiplyType: 'function',
       sum: 3,
       product: 12,
-      electronScriptRuns: 2,
-      cdpScriptRuns: 2,
+      electronScriptRuns: 3,
+      cdpScriptRuns: 3,
     });
 
     assert.deepEqual(result.detach, {
