@@ -752,9 +752,14 @@ Options for awaiting function call results.
 ```ts
 interface WithReturnValueOptions {
   timeout?: number;
+  /** @deprecated Results are delivered directly; this option is ignored. */
   delay?: number;
 }
 ```
+
+Results and errors settle the caller's Promise directly when the host response is evaluated. There is no renderer-side result polling interval. This also allows CDP calls from script-disabled sandbox frames to complete without repeatedly scheduling blocked timer callbacks; page script permissions are not changed. Electron-mode delivery still follows the execution restrictions of `WebFrameMain.executeJavaScript` in the host Electron version.
+
+When a timeout is configured, it includes elapsed time since invocation. A renderer watchdog covers the time before acknowledgement; the main process enforces the remaining timeout after acknowledgement. A timeout rejects the caller but does not cancel a native function that has already started. Retry timers stop on acknowledgement, independently of how long the native function takes to finish. Script-disabled frames cannot execute renderer timers before acknowledgement, so retrying a lost request still requires an executable calling context.
 
 ### `RetryOptions`
 
@@ -766,6 +771,8 @@ interface RetryOptions {
   delay?: number;
 }
 ```
+
+`count` is the maximum number of additional attempts, with a separate budget for each call. Calls without a return value also stop retrying and release their callback state when acknowledged. Retries do not provide exactly-once execution semantics.
 
 ### `Target`
 
